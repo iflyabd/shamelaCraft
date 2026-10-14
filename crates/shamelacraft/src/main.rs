@@ -12,7 +12,7 @@
 use iced::widget::svg::{Handle, Svg};
 use iced::widget::text::Shaping;
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
-use iced::{Element, Font, Length, Task, Theme};
+use iced::{clipboard, Element, Font, Length, Task, Theme};
 use shamela_content::book::{BookDb, TocNode};
 use shamela_content::html::content_to_text;
 use shamela_db::{Author, Book, Library};
@@ -67,6 +67,7 @@ enum Panel {
     #[default]
     Library,
     Authors,
+    Quran,
     Bookmarks,
     Downloads,
 }
@@ -147,6 +148,14 @@ enum Message {
     PageLast,
     TranslatePage,
     CycleTarget,
+    QuranSura(i64),
+    QuranSearch(String),
+    QuranDownload,
+    NoteInput(String),
+    NoteSave,
+    NoteDelete(i64),
+    CopyPage,
+    LastSearch,
     Hint(&'static str),
 }
 
@@ -167,6 +176,12 @@ struct State {
     bookmarks: Vec<Bookmark>,
     panel: Panel,
     lang: Lang,
+    quran_sura: i64,
+    quran_query: String,
+    quran_verses: Vec<shamela_content::quran::Verse>,
+    quran_results: Vec<shamela_content::quran::Verse>,
+    note_input: String,
+    notes: Vec<shamela_content::notes::Note>,
     target_lang: String,
     dl_id: String,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
@@ -195,6 +210,12 @@ impl Default for State {
             bookmarks,
             panel: Panel::Library,
             lang: Lang::Ar,
+            quran_sura: 1,
+            quran_query: String::new(),
+            quran_verses: Vec::new(),
+            quran_results: Vec::new(),
+            note_input: String::new(),
+            notes: Vec::new(),
             target_lang: String::from("en"),
             dl_id: String::from("shamela-16241"),
             dl_files: Vec::new(),
@@ -660,6 +681,7 @@ fn open_imported_pages(
     });
     state.active_tab = Some(state.tabs.len() - 1);
     state.status = format!("imported {title}: {count} pages");
+    refresh_notes(state);
 }
 
 /// Open a converted `Page`/`Title` database file in a reader tab.
@@ -947,6 +969,7 @@ fn move_page(state: &mut State, delta: isize) {
         .get(reader.index)
         .map(|page| content_to_text(&page.content))
         .unwrap_or_default();
+    refresh_notes(state);
 }
 
 fn jump_to_page(state: &mut State, target: usize) {
@@ -969,6 +992,7 @@ fn jump_to_page(state: &mut State, target: usize) {
             .map(|page| content_to_text(&page.content))
             .unwrap_or_default();
     }
+    refresh_notes(state);
 }
 
 fn close_tab(state: &mut State, index: usize) {
@@ -1021,6 +1045,99 @@ fn remove_bookmark(state: &mut State, book_id: i64) {
 // ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
+
+fn quran_db() -> PathBuf {
+    data_dir().join("quran.db")
+}
+
+fn notes_db() -> PathBuf {
+    data_dir().join("notes.db")
+}
+
+fn refresh_quran(state: &mut State) {
+    state.quran_verses.clear();
+    state.quran_results.clear();
+    let Ok(db) = shamela_content::quran::QuranDb::open(&quran_db()) else {
+        return;
+    };
+    if let Ok(verses) = db.sura(state.quran_sura) {
+        state.quran_verses = verses;
+    }
+}
+
+fn download_quran(state: &mut State) {
+    state.status = String::from("downloading quran edition ...");
+    let verses = match shamela_import::quran_dl::fetch_edition(shamela_import::quran_dl::QURAN_URL)
+    {
+        Ok(verses) => verses,
+        Err(err) => {
+            state.status = format!("quran download failed: {err}");
+            return;
+        }
+    };
+    let db = match shamela_content::quran::QuranDb::open(&quran_db()) {
+        Ok(db) => db,
+        Err(err) => {
+            state.status = format!("quran store failed: {err}");
+            return;
+        }
+    };
+    let opts = NormalizeOptions::default();
+    let rows: Vec<(i64, i64, String, String)> = verses
+        .iter()
+        .map(|v| {
+            (
+                v.sura,
+                v.aya,
+                v.text.clone(),
+                shamela_index::normalize_arabic(&v.text, &opts),
+            )
+        })
+        .collect();
+    match db.import(&rows) {
+        Ok(()) => {
+            state.status = format!("quran imported: {} verses", rows.len());
+            refresh_quran(state);
+        }
+        Err(err) => state.status = format!("quran import failed: {err}"),
+    }
+}
+
+fn run_quran_search(state: &mut State) {
+    state.quran_results.clear();
+    let query = state.quran_query.trim().to_string();
+    if query.chars().count() < MIN_QUERY_CHARS {
+        return;
+    }
+    let Ok(db) = shamela_content::quran::QuranDb::open(&quran_db()) else {
+        return;
+    };
+    let opts = NormalizeOptions::default();
+    let norm = shamela_index::normalize_arabic(&query, &opts);
+    if let Ok(hits) = db.search(&norm, 100) {
+        state.quran_results = hits;
+    }
+}
+
+fn refresh_notes(state: &mut State) {
+    state.notes.clear();
+    state.note_input.clear();
+    let Some(index) = state.active_tab else {
+        return;
+    };
+    let Some(tab) = state.tabs.get(index) else {
+        return;
+    };
+    let TabKind::Reader(reader) = &tab.kind else {
+        return;
+    };
+    let Some(page) = reader.pages.get(reader.index) else {
+        return;
+    };
+    if let Ok(store) = shamela_content::notes::NoteStore::open(&notes_db()) {
+        state.notes = store.of_page(tab.book_id, page.id).unwrap_or_default();
+    }
+}
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
@@ -1090,6 +1207,71 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::PageFirst => move_page(state, isize::MIN),
         Message::PageLast => move_page(state, isize::MAX),
         Message::TranslatePage => translate_current(state),
+        Message::CopyPage => {
+            let Some(index) = state.active_tab else {
+                state.status = String::from("open a book first");
+                return Task::none();
+            };
+            let Some(tab) = state.tabs.get(index) else {
+                return Task::none();
+            };
+            let TabKind::Reader(reader) = &tab.kind else {
+                state.status = String::from("open a book first");
+                return Task::none();
+            };
+            let Some(page) = reader.pages.get(reader.index) else {
+                return Task::none();
+            };
+            let body = content_to_text(&page.content);
+            let cited = format!("{}\n[{}]", body, tab.title);
+            return clipboard::write(cited);
+        }
+        Message::LastSearch => {
+            if state.last_query.trim().chars().count() >= MIN_QUERY_CHARS {
+                state.query = state.last_query.clone();
+                run_search(state);
+                state.status = String::from("last search restored");
+            } else {
+                state.status = String::from("no previous search");
+            }
+        }
+        Message::QuranSura(sura) => {
+            state.quran_sura = sura.clamp(1, 114);
+            refresh_quran(state);
+        }
+        Message::QuranSearch(query) => {
+            state.quran_query = query;
+            run_quran_search(state);
+        }
+        Message::QuranDownload => download_quran(state),
+        Message::NoteInput(text) => {
+            state.note_input = text;
+        }
+        Message::NoteSave => {
+            let (book_id, page_id) = match state.active_tab.and_then(|i| state.tabs.get(i)) {
+                Some(tab) => match &tab.kind {
+                    TabKind::Reader(reader) => match reader.pages.get(reader.index) {
+                        Some(page) => (tab.book_id, page.id),
+                        None => (tab.book_id, reader.index as i64),
+                    },
+                    _ => (tab.book_id, 0),
+                },
+                None => {
+                    state.status = String::from("open a book first");
+                    return Task::none();
+                }
+            };
+            if let Ok(store) = shamela_content::notes::NoteStore::open(&notes_db()) {
+                let _ = store.add(book_id, page_id, &state.note_input.clone());
+            }
+            refresh_notes(state);
+        }
+        Message::NoteDelete(id) => {
+            if let Ok(store) = shamela_content::notes::NoteStore::open(&notes_db()) {
+                let _ = store.remove(id);
+            }
+            refresh_notes(state);
+        }
         Message::CycleTarget => {
             state.target_lang = match state.target_lang.as_str() {
                 "en" => String::from("fr"),
@@ -1131,16 +1313,13 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
         tool_btn("searchpage", Message::SearchBook),
         tool_btn("searchbok", Message::SearchBook),
         tool_btn("search", Message::PanelSelected(Panel::Library)),
-        tool_btn(
-            "lastsearch",
-            Message::Hint("type to search; history: roadmap")
-        ),
+        tool_btn("lastsearch", Message::LastSearch),
         tool_btn("saved", Message::PanelSelected(Panel::Bookmarks)),
         tool_btn("first", Message::PageFirst),
         tool_btn("prev", Message::ReaderPrev),
         tool_btn("next", Message::ReaderNext),
         tool_btn("last", Message::PageLast),
-        tool_btn("dipquran", Message::Hint("quran services: roadmap")),
+        tool_btn("dipquran", Message::PanelSelected(Panel::Quran)),
         tool_btn("sharh", Message::Hint("sharh linking: roadmap")),
     ]
     .spacing(2)
@@ -1149,7 +1328,7 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
         tool_btn("import", Message::ImportBok),
         tool_btn("ctr", Message::Hint("control room: roadmap")),
         tool_btn("authors", Message::PanelSelected(Panel::Authors)),
-        tool_btn("copy", Message::Hint("copy page: roadmap")),
+        tool_btn("copy", Message::CopyPage),
         tool_btn("bkmrk", Message::PanelSelected(Panel::Bookmarks)),
         tool_btn("export", Message::ExportBook),
         tool_btn("betaka", Message::OpenCard),
@@ -1303,6 +1482,77 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
         .into()
 }
 
+fn quran_panel(state: &State) -> Element<'_, Message> {
+    let empty = shamela_content::quran::QuranDb::open(&quran_db())
+        .map(|db| db.count().unwrap_or(0) == 0)
+        .unwrap_or(true);
+    if empty {
+        return column![
+            ar(tr(state.lang, "quran"), title_size(state.font_size)),
+            button(ar(tr(state.lang, "download_quran"), 14.0))
+                .on_press(Message::QuranDownload)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .into();
+    }
+    let search = text_input(tr(state.lang, "quran_search"), state.quran_query.as_str())
+        .on_input(Message::QuranSearch)
+        .padding(8);
+    let verses: Vec<Element<'_, Message>> = if !state.quran_results.is_empty() {
+        state
+            .quran_results
+            .iter()
+            .map(|verse| {
+                let label = format!("S{}:{} {}", verse.sura, verse.aya, verse.text);
+                ar(label.as_str(), item_size(state.font_size)).into()
+            })
+            .collect()
+    } else {
+        state
+            .quran_verses
+            .iter()
+            .map(|verse| {
+                let label = format!("({}) {}", verse.aya, verse.text);
+                ar(label.as_str(), item_size(state.font_size)).into()
+            })
+            .collect()
+    };
+    let head =
+        match shamela_content::quran::SURA_NAMES.get(state.quran_sura.saturating_sub(1) as usize) {
+            Some(name) => format!("{} ({})", name, state.quran_verses.len()),
+            None => String::new(),
+        };
+    let verses_view = column![ar(head.as_str(), title_size(state.font_size)), {
+        let items = verses;
+        scrollable(column(items).spacing(4)).height(Length::Fill)
+    }]
+    .spacing(4)
+    .width(Length::FillPortion(2));
+    let suras: Vec<Element<'_, Message>> = shamela_content::quran::SURA_NAMES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let id = index as i64 + 1;
+            let label = format!("{id}. {name}");
+            button(ar(label.as_str(), 13.0))
+                .on_press(Message::QuranSura(id))
+                .width(Length::Fill)
+                .into()
+        })
+        .collect();
+    let sura_view = scrollable(column(suras).spacing(2))
+        .height(Length::Fill)
+        .width(Length::FillPortion(1));
+    column![
+        search,
+        row![verses_view, sura_view].spacing(4).height(Length::Fill)
+    ]
+    .spacing(8)
+    .height(Length::Fill)
+    .into()
+}
+
 fn sidebar(state: &State) -> Element<'_, Message> {
     let search = text_input(tr(state.lang, "search_hint"), state.query.as_str())
         .on_input(Message::SearchInput)
@@ -1315,6 +1565,7 @@ fn sidebar(state: &State) -> Element<'_, Message> {
                 Panel::Library => library_tree(state),
                 Panel::Authors => authors_panel(state),
                 Panel::Bookmarks => bookmark_list(state),
+                Panel::Quran => quran_panel(state),
                 Panel::Downloads => downloads_panel(state),
             }
         };
@@ -1325,11 +1576,9 @@ fn sidebar(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn reader_tab_view<'a>(
-    tab: &'a ReaderTab,
-    font_size: f32,
-    target: &'a str,
-) -> Element<'a, Message> {
+fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
+    let font_size = state.font_size;
+    let target = state.target_lang.as_str();
     let label = match tab.pages.get(tab.index) {
         Some(page) => {
             let position = format!("page {} / {}", tab.index + 1, tab.pages.len());
@@ -1354,6 +1603,28 @@ fn reader_tab_view<'a>(
         button(ar(target.to_uppercase().as_str(), 13.0)).on_press(Message::CycleTarget),
     ]
     .spacing(8);
+    let mut note_items: Vec<Element<'_, Message>> = vec![ar(tr(state.lang, "notes"), 14.0).into()];
+    for note in &state.notes {
+        note_items.push(
+            row![
+                ar(note.text.as_str(), item_size(font_size)),
+                button(ticon("x", 14.0)).on_press(Message::NoteDelete(note.id)),
+            ]
+            .spacing(4)
+            .into(),
+        );
+    }
+    note_items.push(
+        row![
+            text_input(tr(state.lang, "note_hint"), state.note_input.as_str())
+                .on_input(Message::NoteInput)
+                .padding(6)
+                .width(Length::Fill),
+            button(ticon("plus", 16.0)).on_press(Message::NoteSave),
+        ]
+        .spacing(4)
+        .into(),
+    );
     let page_view = column![
         nav,
         scrollable(
@@ -1363,7 +1634,8 @@ fn reader_tab_view<'a>(
                 .shaping(Shaping::Advanced)
                 .width(Length::Fill),
         )
-        .height(Length::Fill),
+        .height(Length::FillPortion(3)),
+        scrollable(column(note_items).spacing(2)).height(Length::FillPortion(1)),
     ]
     .spacing(8)
     .width(Length::FillPortion(2));
@@ -1446,7 +1718,7 @@ fn reader(state: &State) -> Element<'_, Message> {
                         tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
                     ]
                     .spacing(8),
-                    reader_tab_view(reader_tab, state.font_size, &state.target_lang),
+                    reader_tab_view(state, reader_tab),
                 ]
                 .spacing(8)
                 .into(),

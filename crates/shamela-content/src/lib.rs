@@ -23,4 +23,6 @@ pub mod book;
 pub mod cache;
 pub mod decoder;
 pub mod html;
+pub mod notes;
+pub mod quran;
 pub mod roots;
