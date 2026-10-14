@@ -444,6 +444,70 @@ fn download_file(state: &mut State, name: String) {
     import_bok_file(state, &dest, stem);
 }
 
+/// Open converted pages + TOC in a reader tab.
+fn open_imported_pages(
+    state: &mut State,
+    pages: Vec<shamela_content::book::Page>,
+    toc: Vec<shamela_content::book::TocNode>,
+    title: String,
+    book_id: i64,
+) {
+    if pages.is_empty() {
+        state.status = String::from("no pages");
+        return;
+    }
+    let rendered = pages
+        .first()
+        .map(|page| content_to_text(&page.content))
+        .unwrap_or_default();
+    let count = pages.len();
+    state.tabs.push(Tab {
+        book_id,
+        title: title.clone(),
+        kind: TabKind::Reader(ReaderTab {
+            pages,
+            index: 0,
+            toc,
+            rendered,
+        }),
+    });
+    state.active_tab = Some(state.tabs.len() - 1);
+    state.status = format!("imported {title}: {count} pages");
+}
+
+/// Open a converted `Page`/`Title` database file in a reader tab.
+fn open_imported_db(state: &mut State, out: &std::path::Path, title: String, book_id: i64) {
+    let (pages, toc) = match BookDb::open(out) {
+        Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
+        Err(err) => {
+            state.status = format!("open converted failed: {err}");
+            return;
+        }
+    };
+    open_imported_pages(state, pages, toc, title, book_id);
+}
+
+/// Refresh the `.bok` file list of the configured archive.org item.
+fn refresh_download_list(state: &mut State) {
+    let id = state.dl_id.trim().to_string();
+    if id.is_empty() {
+        state.status = String::from("enter an archive.org item id");
+        return;
+    }
+    match shamela_import::archive::item_files(&id) {
+        Ok(files) => {
+            let boks = shamela_import::archive::bok_files(&files);
+            let count = boks.len();
+            state.dl_files = boks.into_iter().cloned().collect();
+            state.status = format!("item {id}: {count} BOK files");
+        }
+        Err(err) => {
+            state.dl_files.clear();
+            state.status = format!("fetch failed: {err}");
+        }
+    }
+}
+
 fn move_page(state: &mut State, delta: isize) {
     let Some(index) = state.active_tab else {
         return;
