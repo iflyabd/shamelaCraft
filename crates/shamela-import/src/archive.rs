@@ -55,6 +55,15 @@ pub fn bok_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
         .collect()
 }
 
+/// Keep directly importable files: `.bok` plus natively extractable
+/// archives (`.zip` / `.tar` / `.tar.gz` / `.rar`).
+pub fn downloadable_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
+    files
+        .iter()
+        .filter(|file| crate::extract::is_importable(&file.name))
+        .collect()
+}
+
 /// Direct download URL for one item file.
 pub fn download_url(identifier: &str, name: &str) -> String {
     let encoded: String = name

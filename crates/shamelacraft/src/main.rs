@@ -344,9 +344,9 @@ fn books_dir() -> PathBuf {
 fn import_bok(state: &mut State) {
     let dialog = rfd::FileDialog::new()
         .add_filter("Shamela legacy book", &["bok", "BOK"])
-        .set_title("اختر ملف .bok");
+        .set_title("bok file");
     let Some(path) = dialog.pick_file() else {
-        state.status = String::from("لم يتم اختيار ملف");
+        state.status = String::from("no file selected");
         return;
     };
     let stem = path
@@ -354,118 +354,13 @@ fn import_bok(state: &mut State) {
         .and_then(|name| name.to_str())
         .unwrap_or("book")
         .to_string();
-    let book = match shamela_import::bok::open_bok(&path) {
-        Ok(book) => book,
-        Err(err) => {
-            state.status = format!("تعذر قراءة BOK: {err}");
-            return;
-        }
-    };
-    if book.pages.is_empty() {
-        state.status = String::from("ملف BOK بلا صفحات مقروءة");
-        return;
-    }
+    import_bok_file(state, &path, stem);
+}
+
+/// Import one local `.bok` file into a reader tab.
+fn import_bok_file(state: &mut State, dest: &std::path::Path, stem: String) {
     let out = books_dir().join(format!("{stem}.db"));
-    if let Err(err) = shamela_import::convert::bok_to_book_db(&book, &out) {
-        state.status = format!("تعذر التحويل: {err}");
-        return;
-    }
-    let (pages, toc) = match BookDb::open(&out) {
-        Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
-        Err(err) => {
-            state.status = format!("تعذر فتح المحوَّل: {err}");
-            return;
-        }
-    };
-    let title = if book.meta.title.is_empty() {
-        stem
-    } else {
-        book.meta.title.clone()
-    };
-    open_imported_pages(state, pages, toc, title, book.meta.id);
-}
-
-/// Open converted pages + TOC in a reader tab.
-fn open_imported_pages(
-    state: &mut State,
-    pages: Vec<shamela_content::book::Page>,
-    toc: Vec<shamela_content::book::TocNode>,
-    title: String,
-    book_id: i64,
-) {
-    if pages.is_empty() {
-        state.status = String::from("no pages");
-        return;
-    }
-    let rendered = pages
-        .first()
-        .map(|page| content_to_text(&page.content))
-        .unwrap_or_default();
-    let count = pages.len();
-    state.tabs.push(Tab {
-        book_id,
-        title: title.clone(),
-        kind: TabKind::Reader(ReaderTab {
-            pages,
-            index: 0,
-            toc,
-            rendered,
-        }),
-    });
-    state.active_tab = Some(state.tabs.len() - 1);
-    state.status = format!("imported {title}: {count} pages");
-}
-
-/// Open a converted `Page`/`Title` database file in a reader tab.
-fn open_imported_db(state: &mut State, out: &std::path::Path, title: String, book_id: i64) {
-    let (pages, toc) = match BookDb::open(out) {
-        Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
-        Err(err) => {
-            state.status = format!("open converted failed: {err}");
-            return;
-        }
-    };
-    open_imported_pages(state, pages, toc, title, book_id);
-}
-
-/// Refresh the `.bok` file list of the configured archive.org item.
-fn refresh_download_list(state: &mut State) {
-    let id = state.dl_id.trim().to_string();
-    if id.is_empty() {
-        state.status = String::from("enter an archive.org item id");
-        return;
-    }
-    match shamela_import::archive::item_files(&id) {
-        Ok(files) => {
-            let boks = shamela_import::archive::bok_files(&files);
-            let count = boks.len();
-            state.dl_files = boks.into_iter().cloned().collect();
-            state.status = format!("item {id}: {count} BOK files");
-        }
-        Err(err) => {
-            state.dl_files.clear();
-            state.status = format!("fetch failed: {err}");
-        }
-    }
-}
-
-/// Download one `.bok` from the configured item, convert, and open it.
-fn download_file(state: &mut State, name: String) {
-    let id = state.dl_id.trim().to_string();
-    let url = shamela_import::archive::download_url(&id, &name);
-    let dest = books_dir().join(&name);
-    state.status = format!("downloading: {name} ...");
-    if let Err(err) = shamela_import::archive::download_to(&url, &dest) {
-        state.status = format!("download failed: {err}");
-        return;
-    }
-    let stem = dest
-        .file_stem()
-        .and_then(|part| part.to_str())
-        .unwrap_or("book")
-        .to_string();
-    let out = books_dir().join(format!("{stem}.db"));
-    let book = match shamela_import::bok::open_bok(&dest) {
+    let book = match shamela_import::bok::open_bok(dest) {
         Ok(book) => book,
         Err(err) => {
             state.status = format!("BOK read failed: {err}");
@@ -482,6 +377,71 @@ fn download_file(state: &mut State, name: String) {
         Ok(()) => open_imported_db(state, &out, title, book_id),
         Err(err) => state.status = format!("convert failed: {err}"),
     }
+}
+
+/// Download one file from the configured item and import it.
+/// `.bok` files import directly; archives are extracted first and every
+/// contained book is imported (the first one opens automatically).
+fn download_file(state: &mut State, name: String) {
+    let id = state.dl_id.trim().to_string();
+    let url = shamela_import::archive::download_url(&id, &name);
+    let file_name = name.rsplit('/').next().unwrap_or(&name).to_string();
+    let dest = books_dir().join(&file_name);
+    state.status = format!("downloading: {name} ...");
+    if let Err(err) = shamela_import::archive::download_to(&url, &dest) {
+        state.status = format!("download failed: {err}");
+        return;
+    }
+    if shamela_import::extract::archive_kind(&file_name).is_some() {
+        let stem = dest
+            .file_stem()
+            .and_then(|part| part.to_str())
+            .unwrap_or("book");
+        let dir = books_dir().join(format!("{stem}_files"));
+        match shamela_import::extract::extract_archive(&dest, &dir) {
+            Ok(boks) if !boks.is_empty() => {
+                let count = boks.len();
+                let mut opened = false;
+                for bok in &boks {
+                    let inner_stem = bok
+                        .file_stem()
+                        .and_then(|part| part.to_str())
+                        .unwrap_or("book")
+                        .to_string();
+                    let out = books_dir().join(format!("{inner_stem}.db"));
+                    let Ok(book) = shamela_import::bok::open_bok(bok) else {
+                        continue;
+                    };
+                    let title = if book.meta.title.is_empty() {
+                        inner_stem
+                    } else {
+                        book.meta.title.clone()
+                    };
+                    if shamela_import::convert::bok_to_book_db(&book, &out).is_err() {
+                        continue;
+                    }
+                    if !opened {
+                        open_imported_db(state, &out, title, book.meta.id);
+                        opened = true;
+                    }
+                }
+                if opened {
+                    state.status = format!("archive {name}: {count} books imported, first opened");
+                } else {
+                    state.status = format!("archive {name}: {count} books found, none readable");
+                }
+            }
+            Ok(_) => state.status = format!("archive {name}: no .bok inside"),
+            Err(err) => state.status = format!("extract failed: {err}"),
+        }
+        return;
+    }
+    let stem = dest
+        .file_stem()
+        .and_then(|part| part.to_str())
+        .unwrap_or("book")
+        .to_string();
+    import_bok_file(state, &dest, stem);
 }
 
 fn move_page(state: &mut State, delta: isize) {
