@@ -1053,7 +1053,7 @@ fn reader(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn welcome(state: &State) -> Element<'_, Message> {
+fn welcome() -> Element<'static, Message> {
     let open = button(ar("فتح قاعدة البيانات", 18.0))
         .on_press(Message::OpenDatabase)
         .width(Length::Fixed(300.0));
@@ -1094,7 +1094,7 @@ fn status_bar(state: &State) -> Element<'_, Message> {
 fn view(state: &State) -> Element<'_, Message> {
     let top = column![menu_bar(), tool_bar(state)];
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
-        welcome(state)
+        welcome()
     } else {
         row![reader(state), sidebar(state)]
             .spacing(8)
