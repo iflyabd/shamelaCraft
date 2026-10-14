@@ -62,6 +62,10 @@ Amiri Regular/Bold are bundled from
 [google/fonts](https://github.com/google/fonts/tree/main/ofl/amiri) under the
 SIL Open Font License 1.1 (`crates/shamelacraft/assets/fonts/OFL.txt`).
 
+## Credits
+
+- Idea: **صقر قريش (Arab Falcon)**
+
 ## License
 
 MIT — see [LICENSE-MIT](LICENSE-MIT).
@@ -75,6 +79,10 @@ MIT — see [LICENSE-MIT](LICENSE-MIT).
 > **إعادة تنفيذ نظيفة.** لا يشارك المشروع أي شيفرة أو نصوص أو أصول مع أي
 > قارئ مملوك، ويقرأ فقط بنية ملف `master.db` الموجود على جهاز المستخدم.
 > لا علاقة له بموقع shamela.ws.
+
+### الشكر والتقدير
+
+- الفكرة: **صقر قريش (Arab Falcon)**
 
 ### المزايا (الإصدار ٠٫١)
 
