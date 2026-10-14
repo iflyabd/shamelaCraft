@@ -5,6 +5,7 @@
 //! [`shamela_content::book::BookDb`] already reads.
 
 use crate::bok::BokBook;
+use crate::{err, Result};
 use shamela_content::book::{BookWriter, NewPage, NewTitle};
 use std::path::Path;
 
@@ -13,8 +14,8 @@ use std::path::Path;
 /// Heading levels become a tree: each heading's parent is the nearest
 /// previous heading with a smaller level; `Title.page` keeps the source
 /// body-row id so the reader can jump to the page.
-pub fn bok_to_book_db(book: &BokBook, out: &Path) -> rusqlite::Result<()> {
-    let writer = BookWriter::create(out)?;
+pub fn bok_to_book_db(book: &BokBook, out: &Path) -> Result<()> {
+    let writer = BookWriter::create(out).map_err(|error| err(error.to_string()))?;
     let pages: Vec<NewPage> = book
         .pages
         .iter()
@@ -26,7 +27,9 @@ pub fn bok_to_book_db(book: &BokBook, out: &Path) -> rusqlite::Result<()> {
             number: page.page.clone(),
         })
         .collect();
-    writer.insert_pages(&pages)?;
+    writer
+        .insert_pages(&pages)
+        .map_err(|error| err(error.to_string()))?;
 
     // Assign sequential title ids, then wire parents by level.
     let mut titles: Vec<(i64, NewTitle)> = Vec::with_capacity(book.toc.len());
@@ -50,6 +53,8 @@ pub fn bok_to_book_db(book: &BokBook, out: &Path) -> rusqlite::Result<()> {
             },
         ));
     }
-    writer.insert_titles(&titles)?;
+    writer
+        .insert_titles(&titles)
+        .map_err(|error| err(error.to_string()))?;
     Ok(())
 }

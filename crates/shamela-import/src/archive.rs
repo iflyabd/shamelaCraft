@@ -23,7 +23,7 @@ pub struct ArchiveFile {
 /// Parse an archive.org metadata document into its file list.
 pub fn parse_item_files(document: &str) -> Result<Vec<ArchiveFile>> {
     let value: serde_json::Value = serde_json::from_str(document)
-        .map_err(|err| crate::err(format!("metadata JSON: {err}")))?;
+        .map_err(|error| crate::err(format!("metadata JSON: {error}")))?;
     let files = value
         .get("files")
         .and_then(|node| node.as_array())
@@ -80,9 +80,9 @@ fn url_encode_segment(segment: &str) -> String {
 fn fetch_text(url: &str) -> Result<String> {
     ureq::get(url)
         .call()
-        .map_err(|err| err(format!("GET {url}: {err}")))?
+        .map_err(|error| err(format!("GET {url}: {error}")))?
         .into_string()
-        .map_err(|err| err(format!("read {url}: {err}")))
+        .map_err(|error| err(format!("read {url}: {error}")))
 }
 
 /// List all files of a public archive.org item.
@@ -94,15 +94,15 @@ pub fn item_files(identifier: &str) -> Result<Vec<ArchiveFile>> {
 /// Download one URL to a local file (streamed, no size limit issues).
 pub fn download_to(url: &str, dest: &std::path::Path) -> Result<u64> {
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| crate::err(format!("mkdir: {err}")))?;
+        std::fs::create_dir_all(parent).map_err(|error| crate::err(format!("mkdir: {error}")))?;
     }
     let response = ureq::get(url)
         .call()
-        .map_err(|err| err(format!("GET {url}: {err}")))?;
+        .map_err(|error| err(format!("GET {url}: {error}")))?;
     let mut reader = response.into_reader();
     let mut file =
-        std::fs::File::create(dest).map_err(|err| crate::err(format!("create file: {err}")))?;
-    std::io::copy(&mut reader, &mut file).map_err(|err| err(format!("write: {err}")))
+        std::fs::File::create(dest).map_err(|error| crate::err(format!("create file: {error}")))?;
+    std::io::copy(&mut reader, &mut file).map_err(|error| err(format!("write: {error}")))
 }
 
 #[cfg(test)]

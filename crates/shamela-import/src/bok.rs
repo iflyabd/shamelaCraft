@@ -81,6 +81,7 @@ fn value_text(value: &Value) -> String {
         Value::Int(num) => num.to_string(),
         Value::BigInt(num) => num.to_string(),
         Value::Byte(num) => num.to_string(),
+        Value::DateTimeExtended(_) => String::new(),
         Value::Float(num) => num.to_string(),
         Value::Double(num) => num.to_string(),
         Value::Bool(flag) => flag.to_string(),
@@ -93,7 +94,7 @@ fn value_text(value: &Value) -> String {
 fn value_int(value: &Value) -> Option<i64> {
     match value {
         Value::Null => None,
-        Value::Long(num) => Some(*num),
+        Value::Long(num) => Some(i64::from(*num)),
         Value::Int(num) => Some(i64::from(*num)),
         Value::BigInt(num) => Some(*num),
         Value::Byte(num) => Some(i64::from(*num)),
@@ -120,13 +121,13 @@ impl Table {
 }
 
 fn read_table(reader: &mut PageReader, name: &str) -> Result<Table> {
-    let catalog = read_catalog(reader).map_err(|err| crate::err(format!("catalog: {err}")))?;
+    let catalog = read_catalog(reader).map_err(|error| crate::err(format!("catalog: {error}")))?;
     let entry = catalog
         .iter()
         .find(|item| item.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| err(format!("table '{name}' not found")))?;
     let def = read_table_def(reader, &entry.name, entry.table_page)
-        .map_err(|err| err(format!("{err}")))?;
+        .map_err(|error| err(format!("{error}")))?;
     let columns = def
         .columns
         .iter()
@@ -134,7 +135,7 @@ fn read_table(reader: &mut PageReader, name: &str) -> Result<Table> {
         .map(|(index, col)| (col.name.to_ascii_lowercase(), index))
         .collect();
     let result =
-        read_table_rows(reader, &def).map_err(|err| err(format!("rows of {name}: {err}")))?;
+        read_table_rows(reader, &def).map_err(|error| err(format!("rows of {name}: {error}")))?;
     Ok(Table {
         columns,
         rows: result.rows,
@@ -163,7 +164,7 @@ pub fn open_bok(path: &Path) -> Result<BokBook> {
         .to_str()
         .ok_or_else(|| err("book path is not valid UTF-8"))?;
     let mut reader =
-        PageReader::open(path_str).map_err(|err| crate::err(format!("open .bok: {err}")))?;
+        PageReader::open(path_str).map_err(|error| crate::err(format!("open .bok: {error}")))?;
 
     let main = read_table(&mut reader, "main")?;
     let row = main
