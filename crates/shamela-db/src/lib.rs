@@ -163,6 +163,23 @@ impl Library {
         rows.collect()
     }
 
+    /// All books of one author (main or co-author), in catalog order.
+    pub fn books_of_author(&self, author_id: i64) -> Result<Vec<Book>> {
+        let sql = format!(
+            "SELECT {} FROM book
+             WHERE book_id IN (
+                 SELECT book_id FROM author_book WHERE author_id = ?1
+                 UNION
+                 SELECT book_id FROM coauthor_book WHERE author_id = ?1
+             )
+             ORDER BY alpha, book_id",
+            Self::BOOK_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![author_id], Self::book_from_row)?;
+        rows.collect()
+    }
+
     fn escape_like(query: &str) -> String {
         query
             .replace('\\', "\\\\")
@@ -265,6 +282,7 @@ mod tests {
         assert_eq!(lib.search_books("الفتاوى", 10)?.len(), 1);
         assert_eq!(lib.search_authors("النووي", 10)?.len(), 1);
         assert_eq!(lib.authors_of_book(100)?[0].name, "ابن تيمية");
+        assert_eq!(lib.books_of_author(10)?.len(), 1);
         assert!(lib.book(999)?.is_none());
         Ok(())
     }
