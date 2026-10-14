@@ -396,7 +396,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 // View
 // ---------------------------------------------------------------------------
 
-fn book_buttons(state: &State, books: &[Book]) -> Element<'_, Message> {
+fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message> {
     if books.is_empty() {
         return text("لا نتائج — جرّب كلمة أخرى").font(AMIRI).into();
     }
