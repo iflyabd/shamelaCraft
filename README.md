@@ -76,7 +76,10 @@ cargo build --release -p shamelacraft
 
 Pure Rust throughout: no C database drivers (SQLite via `rusqlite/bundled`,
 Access/Jet via `jetdb`), TLS via rustls. The same code builds on every OS
-and CPU architecture without emulation.
+and CPU architecture without emulation. (Dependency honesty: the only
+compiled C in the tree is the vendored SQLite amalgamation and tantivy's
+zstd — everything authored for this project, and every format reader, is
+Rust.)
 
 ## Getting books
 
