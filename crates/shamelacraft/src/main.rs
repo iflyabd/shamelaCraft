@@ -290,6 +290,21 @@ fn ticon(name: &'static str, px: f32) -> Element<'static, Message> {
         .into()
 }
 
+/// List row in the classic browser style: transparent until hovered,
+/// highlighted when selected. Used for the three browse lists
+/// (categories, books, authors) and everywhere a list belongs.
+fn list_row(label: String, selected: bool, msg: Message, size: f32) -> Element<'static, Message> {
+    let content = button(ar(label, size))
+        .on_press(msg)
+        .width(Length::Fill)
+        .padding(6);
+    if selected {
+        content.style(button::primary).into()
+    } else {
+        content.style(button::text).into()
+    }
+}
+
 /// Icon toolbar button.
 fn tool_btn(icon: &'static str, msg: Message) -> Element<'static, Message> {
     button(ticon(icon, 22.0)).on_press(msg).padding(5).into()
@@ -1174,6 +1189,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::TabClosed(index) => close_tab(state, index),
         Message::PanelSelected(panel) => {
             state.panel = panel;
+            if panel == Panel::Authors && state.query.trim().chars().count() < MIN_QUERY_CHARS {
+                if let Some(lib) = state.lib.as_ref() {
+                    state.authors = lib.search_authors("", 200).unwrap_or_default();
+                }
+            }
         }
         Message::BookmarkAdd => add_bookmark(state),
         Message::BookmarkRemove(id) => remove_bookmark(state, id),
@@ -1352,14 +1372,16 @@ fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message>
     if books.is_empty() {
         return ar(tr(state.lang, "no_results"), state.font_size);
     }
-    let items: Vec<Element<'_, Message>> = books
+    let items: Vec<Element<'static, Message>> = books
         .iter()
         .take(200)
         .map(|book| {
-            button(ar(book.name.as_str(), item_size(state.font_size)))
-                .on_press(Message::BookOpened(book.id))
-                .width(Length::Fill)
-                .into()
+            list_row(
+                book.name.clone(),
+                false,
+                Message::BookOpened(book.id),
+                item_size(state.font_size),
+            )
         })
         .collect();
     scrollable(column(items).spacing(4))
@@ -1371,17 +1393,12 @@ fn library_tree(state: &State) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     items.push(ar(tr(state.lang, "sections"), title_size(state.font_size)));
     for category in &state.categories {
-        let label = if Some(category.id) == state.active_category {
-            format!("> {}", category.name)
-        } else {
-            category.name.clone()
-        };
-        items.push(
-            button(ar(label.as_str(), item_size(state.font_size)))
-                .on_press(Message::CategorySelected(category.id))
-                .width(Length::Fill)
-                .into(),
-        );
+        items.push(list_row(
+            category.name.clone(),
+            Some(category.id) == state.active_category,
+            Message::CategorySelected(category.id),
+            item_size(state.font_size),
+        ));
     }
     items.push(ar(tr(state.lang, "books"), title_size(state.font_size)));
     if state.active_category.is_none() && state.active_author.is_none() {
@@ -1391,12 +1408,12 @@ fn library_tree(state: &State) -> Element<'_, Message> {
         ));
     }
     for book in state.books.iter().take(200) {
-        items.push(
-            button(ar(book.name.as_str(), item_size(state.font_size)))
-                .on_press(Message::BookOpened(book.id))
-                .width(Length::Fill)
-                .into(),
-        );
+        items.push(list_row(
+            book.name.clone(),
+            false,
+            Message::BookOpened(book.id),
+            item_size(state.font_size),
+        ));
     }
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
@@ -1423,12 +1440,12 @@ fn authors_panel(state: &State) -> Element<'_, Message> {
         } else {
             format!("{} ({})", author.name, author.death_text)
         };
-        items.push(
-            button(ar(label.as_str(), item_size(state.font_size)))
-                .on_press(Message::AuthorSelected(author.id))
-                .width(Length::Fill)
-                .into(),
-        );
+        items.push(list_row(
+            label,
+            Some(author.id) == state.active_author,
+            Message::AuthorSelected(author.id),
+            item_size(state.font_size),
+        ));
     }
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
@@ -1444,11 +1461,13 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
         .iter()
         .map(|mark| {
             row![
-                button(ar(mark.title.as_str(), item_size(state.font_size)))
-                    .on_press(Message::BookOpened(mark.id))
-                    .width(Length::Fill),
-                button(ar(tr(state.lang, "delete"), 14.0))
-                    .on_press(Message::BookmarkRemove(mark.id)),
+                list_row(
+                    mark.title.clone(),
+                    false,
+                    Message::BookOpened(mark.id),
+                    item_size(state.font_size),
+                ),
+                button(ticon("x", 16.0)).on_press(Message::BookmarkRemove(mark.id)),
             ]
             .spacing(4)
             .into()
@@ -1470,12 +1489,12 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
     for file in &state.dl_files {
         let megabytes = file.size as f64 / 1_048_576.0;
         let label = format!("{} ({megabytes:.1} MB)", file.name);
-        items.push(
-            button(ar(label.as_str(), item_size(state.font_size)))
-                .on_press(Message::DownloadFile(file.name.clone()))
-                .width(Length::Fill)
-                .into(),
-        );
+        items.push(list_row(
+            label,
+            false,
+            Message::DownloadFile(file.name.clone()),
+            item_size(state.font_size),
+        ));
     }
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
@@ -1535,10 +1554,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
         .map(|(index, name)| {
             let id = index as i64 + 1;
             let label = format!("{id}. {name}");
-            button(ar(label.as_str(), 13.0))
-                .on_press(Message::QuranSura(id))
-                .width(Length::Fill)
-                .into()
+            list_row(label, id == state.quran_sura, Message::QuranSura(id), 13.0)
         })
         .collect();
     let sura_view = scrollable(column(suras).spacing(2))
@@ -1654,21 +1670,28 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
     }
     let mut flat: Vec<(usize, &TocNode)> = Vec::new();
     flatten(&tab.toc, 0, &mut flat);
-    let entries: Vec<Element<'_, Message>> = flat
+    let here = tab
+        .pages
+        .get(tab.index)
+        .map(|page| page.id.to_string())
+        .unwrap_or_default();
+    let entries: Vec<Element<'static, Message>> = flat
         .into_iter()
         .map(|(depth, node)| {
             let label = format!("{}{}", "  ".repeat(depth), node.content);
-            let widget = ar(label.as_str(), (font_size - 4.0).max(12.0));
-            let target = node
+            let selected = !here.is_empty() && node.page.as_deref() == Some(here.as_str());
+            match node
                 .page
                 .as_deref()
-                .and_then(|raw| tab.pages.iter().position(|page| page.id.to_string() == raw));
-            match target {
-                Some(index) => button(widget)
-                    .on_press(Message::TocJump(index))
-                    .width(Length::Fill)
-                    .into(),
-                None => widget,
+                .and_then(|raw| tab.pages.iter().position(|page| page.id.to_string() == raw))
+            {
+                Some(index) => list_row(
+                    label,
+                    selected,
+                    Message::TocJump(index),
+                    (font_size - 4.0).max(12.0),
+                ),
+                None => ar(label.as_str(), (font_size - 4.0).max(12.0)),
             }
         })
         .collect();
