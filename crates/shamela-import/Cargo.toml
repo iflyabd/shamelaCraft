@@ -11,7 +11,7 @@ jetdb = "0.3"
 ureq = "2"
 serde_json = "1"
 encoding_rs = "0.8"
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 rars = "0.10"
