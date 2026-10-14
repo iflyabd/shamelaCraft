@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(normalize_arabic("مُحَمَّد", &opts), "محمد");
         assert_eq!(normalize_arabic("أحمد", &opts), "احمد");
         assert_eq!(normalize_arabic("القرآن", &opts), "القران");
-        assert_eq!(normalize_arabic("مكتــبة", &opts), "مكتبه");
+        assert_eq!(normalize_arabic("مكتــبة", &opts), "مكتبة");
     }
 
     #[test]
@@ -176,7 +176,8 @@ mod tests {
             )
             .unwrap();
 
-        let hits = index.search("بخاري", &opts, 10).unwrap();
+        // Definite-article terms match literally (no ال-stripping, like Shamela).
+        let hits = index.search("البخاري", &opts, 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 1);
 
