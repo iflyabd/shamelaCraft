@@ -7,6 +7,18 @@
 use rusqlite::{params, Connection, OpenFlags, Result};
 use std::path::Path;
 
+/// Read any SQLite cell as an integer. Real-world databases mix storage
+/// classes (a sentinel row may even hold `'#'`), so strict decoding fails.
+fn cell_int(value: rusqlite::types::Value) -> Option<i64> {
+    match value {
+        rusqlite::types::Value::Null => None,
+        rusqlite::types::Value::Integer(num) => Some(num),
+        rusqlite::types::Value::Real(num) => Some(num as i64),
+        rusqlite::types::Value::Text(text) => text.trim().parse::<i64>().ok(),
+        rusqlite::types::Value::Blob(_) => None,
+    }
+}
+
 /// A top-level library section (e.g. العقيدة، الفقه).
 #[derive(Debug, Clone)]
 pub struct Category {
@@ -73,7 +85,7 @@ impl Library {
             Ok(Category {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                order: row.get(2)?,
+                order: cell_int(row.get(2)?).unwrap_or(0),
             })
         })?;
         rows.collect()
@@ -83,12 +95,12 @@ impl Library {
         Ok(Book {
             id: row.get("book_id")?,
             name: row.get("book_name")?,
-            category: row.get("book_category")?,
-            book_type: row.get("book_type")?,
+            category: cell_int(row.get("book_category")?).unwrap_or(0),
+            book_type: cell_int(row.get("book_type")?).unwrap_or(0),
             authors: row.get::<_, Option<String>>("authors")?.unwrap_or_default(),
-            main_author: row.get::<_, Option<i64>>("main_author")?.unwrap_or(0),
-            printed: row.get::<_, Option<i64>>("printed")?.unwrap_or(0),
-            parent: row.get("parent")?,
+            main_author: cell_int(row.get("main_author")?).unwrap_or(0),
+            printed: cell_int(row.get("printed")?).unwrap_or(0),
+            parent: cell_int(row.get("parent")?),
             pdf_links: row
                 .get::<_, Option<String>>("pdf_links")?
                 .unwrap_or_default(),
@@ -133,7 +145,7 @@ impl Library {
             Ok(Author {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                death_number: row.get(2)?,
+                death_number: cell_int(row.get(2)?),
                 death_text: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             })
         })?;
@@ -156,7 +168,7 @@ impl Library {
             Ok(Author {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                death_number: row.get(2)?,
+                death_number: cell_int(row.get(2)?),
                 death_text: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             })
         })?;
@@ -217,7 +229,7 @@ impl Library {
             Ok(Author {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                death_number: row.get(2)?,
+                death_number: cell_int(row.get(2)?),
                 death_text: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             })
         })?;
@@ -261,6 +273,7 @@ mod tests {
              CREATE TABLE author_book (author_id INTEGER, book_id INTEGER);
              CREATE TABLE coauthor_book (author_id INTEGER, book_id INTEGER);
              INSERT INTO category VALUES (1, 'العقيدة', 1), (2, 'الفقه', 2);
+             INSERT INTO category VALUES (42, '#', '#');
              INSERT INTO author VALUES (10, 'ابن تيمية', 728, 'ت 728هـ', 1), (11, 'النووي', 676, 'ت 676هـ', 2);
              INSERT INTO book VALUES
                  (100, 'مجموع الفتاوى', 1, 1, NULL, NULL, 10, 1, NULL, NULL, NULL, NULL, NULL, NULL, '', NULL, NULL, NULL, NULL, '', NULL, 1, NULL, NULL),
@@ -276,8 +289,8 @@ mod tests {
         let counts = lib.counts()?;
         assert_eq!(counts.books, 2);
         assert_eq!(counts.authors, 2);
-        assert_eq!(counts.categories, 2);
-        assert_eq!(lib.categories()?.len(), 2);
+        assert_eq!(counts.categories, 3);
+        assert_eq!(lib.categories()?.len(), 3);
         assert_eq!(lib.books_in_category(1)?.len(), 1);
         assert_eq!(lib.search_books("الفتاوى", 10)?.len(), 1);
         assert_eq!(lib.search_authors("النووي", 10)?.len(), 1);
