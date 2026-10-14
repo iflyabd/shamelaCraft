@@ -21,8 +21,14 @@ Lightweight, open-source Arabic library reader in pure Rust.
 
 ## Roadmap to full parity (detail by detail)
 
-- [ ] `ContentProvider` trait + Lucene stored-fields reader (full book text)
-- [ ] BOK importer (legacy libraries)
+- [x] `shamela-content`: per-book `.db` reader (`Page`/`Title` + patch semantics)
+- [x] S1/S2 substitution-cipher decoder port (see Knowledge below)
+- [x] HTML content pipeline port (titles, hadeeth tags, footnotes, ⦗⦘ markers, ligatures)
+- [ ] Wire the reader view to pages + TOC in the GUI
+- [ ] S2 roots lookup wiring (morphological search expansion)
+- [ ] BOK importer for legacy libraries (see `shaybix/mdb2json` for the MDB schema)
+- [ ] Content acquisition guide (official per-book downloads need an API key: mail@shamela.ws)
+- [ ] Optional: Lucene stored-fields reader for offline desktop data
 - [ ] Advanced search: exact phrase, AND/OR, footnotes scope, per-book scope
 - [ ] Sharh↔Matn linked scrolling, side-by-side tabs
 - [ ] Notes, highlights, reading history, export
@@ -53,8 +59,22 @@ cargo test --workspace
 ```text
 crates/shamela-db      read-only master.db access (rusqlite)
 crates/shamela-index   Arabic normalization + tantivy index
+crates/shamela-content book .db reader, S1/S2 decoder, HTML pipeline, roots lookup
 crates/shamelacraft    iced GUI binary + bookmarks store
 ```
+
+## Knowledge & attribution
+
+The content layer ports documented, MIT-licensed research — no proprietary
+code is copied, and no book texts are bundled:
+
+- [ragaeeb/shamela](https://github.com/ragaeeb/shamela) — S1/S2 decoder tables
+  and algorithm, `Page`/`Title` schema and patch protocol, HTML pipeline
+  semantics (title spans, hadeeth tags, footnote/page markers, ligatures)
+- [shaybix/mdb2json](https://github.com/shaybix/mdb2json) — legacy `.bok`
+  (MS Access) extraction reference for the future BOK importer
+- [yshalsager/shamela-epub-exporter](https://github.com/yshalsager/shamela-epub-exporter) —
+  EPUB export approach reference
 
 ## Fonts
 

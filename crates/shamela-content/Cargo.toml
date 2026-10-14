@@ -1,0 +1,10 @@
+[package]
+name = "shamela-content"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Book content layer for ShamelaCraft: per-book SQLite reader, S1/S2 decoder, HTML pipeline"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+encoding_rs = "0.8"
