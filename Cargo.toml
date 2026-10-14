@@ -4,5 +4,6 @@ members = [
     "crates/shamela-db",
     "crates/shamela-index",
     "crates/shamela-content",
+    "crates/shamela-import",
     "crates/shamelacraft",
 ]

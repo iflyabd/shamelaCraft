@@ -15,3 +15,5 @@ rfd = "0.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 shamela-db = { path = "../shamela-db" }
 shamela-index = { path = "../shamela-index" }
+shamela-content = { path = "../shamela-content" }
+shamela-import = { path = "../shamela-import" }

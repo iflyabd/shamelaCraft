@@ -14,6 +14,9 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - Tolerant Arabic search (tashkeel / hamza / tatweel insensitive) over titles
   and authors, powered by [tantivy](https://github.com/quickwit-oss/tantivy)
 - Tabbed catalog cards (title, authors, death dates, print status)
+- Legacy `.bok` import (pure-Rust Jet/MDB reader) into local `Page`/`Title`
+  databases, with full-text reader tabs, page navigation, and TOC jumping
+- Keyless acquisition helpers for public archive.org Shamela collections
 - Persistent bookmarks (`~/.shamelacraft/bookmarks.db`)
 - RTL-first layout, bundled Amiri font (SIL OFL), light/dark themes,
   adjustable font size
@@ -24,9 +27,11 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - [x] `shamela-content`: per-book `.db` reader (`Page`/`Title` + patch semantics)
 - [x] S1/S2 substitution-cipher decoder port (see Knowledge below)
 - [x] HTML content pipeline port (titles, hadeeth tags, footnotes, ⦗⦘ markers, ligatures)
-- [ ] Wire the reader view to pages + TOC in the GUI
+- [x] `shamela-import`: legacy `.bok` reader (pure-Rust `jetdb`, cp1256 recovery)
+- [x] `shamela-import`: keyless archive.org item listing + `.bok` downloads
+- [x] Reader tabs with page navigation + TOC jumping in the GUI
 - [ ] S2 roots lookup wiring (morphological search expansion)
-- [ ] BOK importer for legacy libraries (see `shaybix/mdb2json` for the MDB schema)
+- [ ] EPUB importer (same `Page`/`Title` target)
 - [ ] Content acquisition guide (official per-book downloads need an API key: mail@shamela.ws)
 - [ ] Optional: Lucene stored-fields reader for offline desktop data
 - [ ] Advanced search: exact phrase, AND/OR, footnotes scope, per-book scope

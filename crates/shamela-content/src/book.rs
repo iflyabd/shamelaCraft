@@ -190,6 +190,103 @@ impl BookDb {
     }
 }
 
+/// A page row to write with [`BookWriter`].
+#[derive(Debug, Clone)]
+pub struct NewPage {
+    pub id: i64,
+    pub content: String,
+    pub part: Option<String>,
+    pub page: Option<String>,
+    pub number: Option<String>,
+}
+
+/// A title row to write with [`BookWriter`].
+#[derive(Debug, Clone)]
+pub struct NewTitle {
+    pub content: String,
+    pub page: Option<String>,
+    pub parent: Option<String>,
+}
+
+/// Creates `Page`/`Title` databases (the same schema [`BookDb`] reads),
+/// used by every importer so all sources converge on one format.
+pub struct BookWriter {
+    conn: Connection,
+}
+
+impl BookWriter {
+    /// Create (or open) a book database file, ensuring the schema.
+    pub fn create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|_| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+            }
+        }
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS Page (
+                id INTEGER, content TEXT, part TEXT, page TEXT,
+                number TEXT, services TEXT, is_deleted TEXT
+            );
+            CREATE TABLE IF NOT EXISTS Title (
+                id INTEGER, content TEXT, page INTEGER,
+                parent INTEGER, is_deleted TEXT
+            );",
+        )?;
+        Ok(Self { conn })
+    }
+
+    /// Bulk-insert pages inside one transaction.
+    pub fn insert_pages(&self, pages: &[NewPage]) -> Result<()> {
+        self.conn.execute_batch("BEGIN;")?;
+        let outcome = (|| {
+            let mut stmt = self.conn.prepare(
+                "INSERT INTO Page (id, content, part, page, number)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for page in pages {
+                stmt.execute(params![
+                    page.id,
+                    page.content,
+                    page.part,
+                    page.page,
+                    page.number
+                ])?;
+            }
+            Ok::<(), rusqlite::Error>(())
+        })();
+        match outcome {
+            Ok(()) => self.conn.execute_batch("COMMIT;"),
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(err)
+            }
+        }
+    }
+
+    /// Bulk-insert titles with explicit ids inside one transaction.
+    pub fn insert_titles(&self, titles: &[(i64, NewTitle)]) -> Result<()> {
+        self.conn.execute_batch("BEGIN;")?;
+        let outcome = (|| {
+            let mut stmt = self
+                .conn
+                .prepare("INSERT INTO Title (id, content, page, parent) VALUES (?1, ?2, ?3, ?4)")?;
+            for (id, title) in titles {
+                stmt.execute(params![id, title.content, title.page, title.parent])?;
+            }
+            Ok::<(), rusqlite::Error>(())
+        })();
+        match outcome {
+            Ok(()) => self.conn.execute_batch("COMMIT;"),
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(err)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +330,36 @@ mod tests {
         assert_eq!(toc[0].content, "مقدمة الكتاب");
         assert_eq!(toc[0].children.len(), 1);
         assert_eq!(toc[0].children[0].content, "الباب الأول");
+        Ok(())
+    }
+
+    #[test]
+    fn writer_round_trip() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("shamelacraft-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("book.db");
+        {
+            let writer = BookWriter::create(&path)?;
+            writer.insert_pages(&[NewPage {
+                id: 1,
+                content: "<p>نص</p>".to_string(),
+                part: Some("1".to_string()),
+                page: Some("5".to_string()),
+                number: Some("5".to_string()),
+            }])?;
+            writer.insert_titles(&[(
+                1,
+                NewTitle {
+                    content: "باب".to_string(),
+                    page: Some("1".to_string()),
+                    parent: None,
+                },
+            )])?;
+        }
+        let db = BookDb::open(&path)?;
+        assert_eq!(db.page_count()?, 1);
+        assert_eq!(db.titles()?.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

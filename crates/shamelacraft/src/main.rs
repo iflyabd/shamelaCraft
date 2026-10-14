@@ -10,6 +10,8 @@
 
 use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Font, Length, Task, Theme};
+use shamela_content::book::{BookDb, TocNode};
+use shamela_content::html::content_to_text;
 use shamela_db::{Book, Library};
 use shamela_index::{BookIndex, NormalizeOptions};
 use std::path::PathBuf;
@@ -42,10 +44,23 @@ impl std::fmt::Display for AppTheme {
 }
 
 #[derive(Debug, Clone)]
+struct ReaderTab {
+    pages: Vec<shamela_content::book::Page>,
+    index: usize,
+    toc: Vec<TocNode>,
+}
+
+#[derive(Debug, Clone)]
+enum TabKind {
+    Card(String),
+    Reader(ReaderTab),
+}
+
+#[derive(Debug, Clone)]
 struct Tab {
     book_id: i64,
     title: String,
-    body: String,
+    kind: TabKind,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +72,7 @@ struct Bookmark {
 #[derive(Debug, Clone)]
 enum Message {
     OpenDatabase,
+    ImportBok,
     SearchInput(String),
     CategorySelected(i64),
     BookOpened(i64),
@@ -65,6 +81,9 @@ enum Message {
     PanelSelected(Panel),
     BookmarkAdd,
     BookmarkRemove(i64),
+    ReaderPrev,
+    ReaderNext,
+    TocJump(usize),
     FontBigger,
     FontSmaller,
     ThemeSelected(AppTheme),
@@ -300,9 +319,107 @@ fn open_tab(state: &mut State, book_id: i64) {
     state.tabs.push(Tab {
         book_id,
         title: book.name.clone(),
-        body,
+        kind: TabKind::Card(body),
     });
     state.active_tab = Some(state.tabs.len() - 1);
+}
+
+fn books_dir() -> PathBuf {
+    let dir = data_dir().join("books");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Import a legacy `.bok` file: read with `shamela-import`, normalize into
+/// a local `Page`/`Title` database, and open it in a reader tab.
+fn import_bok(state: &mut State) {
+    let dialog = rfd::FileDialog::new()
+        .add_filter("Shamela legacy book", &["bok", "BOK"])
+        .set_title("اختر ملف .bok");
+    let Some(path) = dialog.pick_file() else {
+        state.status = String::from("لم يتم اختيار ملف");
+        return;
+    };
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("book")
+        .to_string();
+    let book = match shamela_import::bok::open_bok(&path) {
+        Ok(book) => book,
+        Err(err) => {
+            state.status = format!("تعذر قراءة BOK: {err}");
+            return;
+        }
+    };
+    if book.pages.is_empty() {
+        state.status = String::from("ملف BOK بلا صفحات مقروءة");
+        return;
+    }
+    let out = books_dir().join(format!("{stem}.db"));
+    if let Err(err) = shamela_import::convert::bok_to_book_db(&book, &out) {
+        state.status = format!("تعذر التحويل: {err}");
+        return;
+    }
+    let pages = match BookDb::open(&out) {
+        Ok(db) => (
+            db.pages().unwrap_or_default(),
+            db.toc().unwrap_or_default(),
+        ),
+        Err(err) => {
+            state.status = format!("تعذر فتح المحوَّل: {err}");
+            return;
+        }
+    };
+    let title = if book.meta.title.is_empty() {
+        stem
+    } else {
+        book.meta.title.clone()
+    };
+    let count = pages.0.len();
+    state.tabs.push(Tab {
+        book_id: book.meta.id,
+        title: title.clone(),
+        kind: TabKind::Reader(ReaderTab {
+            pages: pages.0,
+            index: 0,
+            toc: pages.1,
+        }),
+    });
+    state.active_tab = Some(state.tabs.len() - 1);
+    state.status = format!("تم استيراد {title}: {count} صفحة");
+}
+
+fn move_page(state: &mut State, delta: isize) {
+    let Some(index) = state.active_tab else {
+        return;
+    };
+    let Some(tab) = state.tabs.get_mut(index) else {
+        return;
+    };
+    let TabKind::Reader(reader) = &mut tab.kind else {
+        return;
+    };
+    if reader.pages.is_empty() {
+        return;
+    }
+    let last = reader.pages.len() as isize - 1;
+    reader.index = (reader.index as isize + delta).clamp(0, last) as usize;
+}
+
+fn jump_to_page(state: &mut State, target: usize) {
+    let Some(index) = state.active_tab else {
+        return;
+    };
+    let Some(tab) = state.tabs.get_mut(index) else {
+        return;
+    };
+    let TabKind::Reader(reader) = &mut tab.kind else {
+        return;
+    };
+    if target < reader.pages.len() {
+        reader.index = target;
+    }
 }
 
 fn close_tab(state: &mut State, index: usize) {
@@ -359,6 +476,7 @@ fn remove_bookmark(state: &mut State, book_id: i64) {
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::OpenDatabase => open_database(state),
+        Message::ImportBok => import_bok(state),
         Message::SearchInput(query) => {
             state.query = query;
             run_search(state);
@@ -379,6 +497,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::BookmarkAdd => add_bookmark(state),
         Message::BookmarkRemove(id) => remove_bookmark(state, id),
+        Message::ReaderPrev => move_page(state, -1),
+        Message::ReaderNext => move_page(state, 1),
+        Message::TocJump(target) => jump_to_page(state, target),
         Message::FontBigger => {
             state.font_size = (state.font_size + 1.0).min(34.0);
         }
@@ -520,6 +641,76 @@ fn sidebar(state: &State) -> Element<'_, Message> {
         .into()
 }
 
+fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
+    let (label, body) = match tab.pages.get(tab.index) {
+        Some(page) => {
+            let position = format!("صفحة {} من {}", tab.index + 1, tab.pages.len());
+            let origin = match (&page.part, &page.page) {
+                (Some(part), Some(number)) => format!(" (جزء {part} — صفحة {number})"),
+                _ => String::new(),
+            };
+            (
+                format!("{position}{origin}"),
+                content_to_text(&page.content),
+            )
+        }
+        None => (String::from("لا صفحات"), String::new()),
+    };
+    let nav = row![
+        button(text("التالي").font(AMIRI)).on_press(Message::ReaderNext),
+        text(label).font(AMIRI).size(16.0),
+        button(text("السابق").font(AMIRI)).on_press(Message::ReaderPrev),
+    ]
+    .spacing(8);
+    let page_view = column![
+        nav,
+        scrollable(
+            text(body.as_str())
+                .font(AMIRI)
+                .size(font_size)
+                .width(Length::Fill),
+        )
+        .height(Length::Fill),
+    ]
+    .spacing(8)
+    .width(Length::FillPortion(2));
+
+    fn flatten<'a>(nodes: &'a [TocNode], depth: usize, out: &mut Vec<(usize, &'a TocNode)>) {
+        for node in nodes {
+            out.push((depth, node));
+            flatten(&node.children, depth + 1, out);
+        }
+    }
+    let mut flat: Vec<(usize, &TocNode)> = Vec::new();
+    flatten(&tab.toc, 0, &mut flat);
+    let entries: Vec<Element<'_, Message>> = flat
+        .into_iter()
+        .map(|(depth, node)| {
+            let label = format!("{}{}", "  ".repeat(depth), node.content);
+            let widget = text(label).font(AMIRI).size((font_size - 4.0).max(12.0));
+            let target = node.page.as_deref().and_then(|raw| {
+                tab.pages
+                    .iter()
+                    .position(|page| page.id.to_string() == raw)
+            });
+            match target {
+                Some(index) => button(widget)
+                    .on_press(Message::TocJump(index))
+                    .width(Length::Fill)
+                    .into(),
+                None => widget.into(),
+            }
+        })
+        .collect();
+    let toc_view = scrollable(column(entries).spacing(2))
+        .height(Length::Fill)
+        .width(Length::FillPortion(1));
+    row![page_view, toc_view]
+        .spacing(8)
+        .height(Length::Fill)
+        .into()
+}
+
 fn reader(state: &State) -> Element<'_, Message> {
     let tabs: Vec<Element<'_, Message>> = state
         .tabs
@@ -539,23 +730,42 @@ fn reader(state: &State) -> Element<'_, Message> {
     let tab_bar = row(tabs).spacing(4);
     let content: Element<'_, Message> =
         match state.active_tab.and_then(|index| state.tabs.get(index)) {
-            Some(tab) => column![
-                row![
-                    button(text("إضافة للمفضلة").font(AMIRI)).on_press(Message::BookmarkAdd),
-                    button(text("إغلاق التبويب").font(AMIRI))
-                        .on_press(Message::TabClosed(state.active_tab.unwrap_or(0))),
+            Some(tab) => match &tab.kind {
+                TabKind::Card(body) => column![
+                    row![
+                        button(text("إضافة للمفضلة").font(AMIRI))
+                            .on_press(Message::BookmarkAdd),
+                        button(text("إغلاق التبويب").font(AMIRI))
+                            .on_press(Message::TabClosed(
+                                state.active_tab.unwrap_or(0)
+                            )),
+                    ]
+                    .spacing(8),
+                    scrollable(
+                        text(body.as_str())
+                            .font(AMIRI)
+                            .size(state.font_size)
+                            .width(Length::Fill),
+                    )
+                    .height(Length::Fill),
                 ]
-                .spacing(8),
-                scrollable(
-                    text(tab.body.as_str())
-                        .font(AMIRI)
-                        .size(state.font_size)
-                        .width(Length::Fill),
-                )
-                .height(Length::Fill),
-            ]
-            .spacing(8)
-            .into(),
+                .spacing(8)
+                .into(),
+                TabKind::Reader(reader_tab) => column![
+                    row![
+                        button(text("إضافة للمفضلة").font(AMIRI))
+                            .on_press(Message::BookmarkAdd),
+                        button(text("إغلاق التبويب").font(AMIRI))
+                            .on_press(Message::TabClosed(
+                                state.active_tab.unwrap_or(0)
+                            )),
+                    ]
+                    .spacing(8),
+                    reader_tab_view(reader_tab, state.font_size),
+                ]
+                .spacing(8)
+                .into(),
+            },
             None => text("اختر كتابا من القائمة الجانبية لفتحه هنا")
                 .font(AMIRI)
                 .size(state.font_size)
@@ -572,6 +782,7 @@ fn view(state: &State) -> Element<'_, Message> {
     let header = row![
         text("شاملة كرافت").font(AMIRI).size(24.0),
         button(text("فتح قاعدة البيانات").font(AMIRI)).on_press(Message::OpenDatabase),
+        button(text("استيراد BOK").font(AMIRI)).on_press(Message::ImportBok),
         button(text("المكتبة").font(AMIRI)).on_press(Message::PanelSelected(Panel::Library)),
         button(text("المفضلة").font(AMIRI)).on_press(Message::PanelSelected(Panel::Bookmarks)),
         button(text("A+").font(AMIRI)).on_press(Message::FontBigger),
