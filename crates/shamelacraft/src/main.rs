@@ -12,10 +12,12 @@
 use iced::widget::pane_grid::{self, Axis};
 use iced::widget::svg::{Handle, Svg};
 use iced::widget::text::Shaping;
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space, Stack};
 use iced::{clipboard, Element, Font, Length, Task, Theme};
+use iced::{keyboard, Background, Color};
 use shamela_content::book::{BookDb, TocNode};
 use shamela_content::html::content_to_text;
+use shamela_content::quran::Verse;
 use shamela_db::{Author, Book, Library};
 mod i18n;
 use i18n::{tr, Lang};
@@ -111,6 +113,7 @@ struct ReaderTab {
 enum TabKind {
     Card(String),
     Reader(ReaderTab),
+    Quran { sura: i64, verses: Vec<Verse> },
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +172,14 @@ enum Message {
     PaneResized(pane_grid::ResizeEvent),
     ToggleToc,
     ToggleNotes,
+    ToggleSettings,
+    ToggleTashkeel,
+    ToggleOptHamza,
+    ToggleOptTashkeel,
+    ToggleOptTatweel,
+    ClearCache,
+    ResetAll,
+    CloseActiveTab,
     OpenImported(String),
     FindPage,
     DeleteBook(String),
@@ -194,13 +205,15 @@ struct State {
     lang: Lang,
     quran_sura: i64,
     quran_query: String,
-    quran_verses: Vec<shamela_content::quran::Verse>,
     quran_results: Vec<shamela_content::quran::Verse>,
     note_input: String,
     notes: Vec<shamela_content::notes::Note>,
     panes: pane_grid::State<PaneKind>,
     show_toc: bool,
     show_notes: bool,
+    show_tashkeel: bool,
+    show_settings: bool,
+    search_opts: NormalizeOptions,
     control_files: Vec<(String, u64)>,
     target_lang: String,
     dl_id: String,
@@ -232,18 +245,20 @@ impl Default for State {
             lang: Lang::Ar,
             quran_sura: 1,
             quran_query: String::new(),
-            quran_verses: Vec::new(),
             quran_results: Vec::new(),
             note_input: String::new(),
             notes: Vec::new(),
             panes: init_panes(),
             show_toc: true,
             show_notes: true,
+            show_tashkeel: true,
+            show_settings: false,
+            search_opts: NormalizeOptions::default(),
             control_files: Vec::new(),
             target_lang: String::from("en"),
             dl_id: String::from("shamela-16241"),
             dl_files: Vec::new(),
-            font_size: 20.0,
+            font_size: 22.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
         };
@@ -457,8 +472,11 @@ fn read_bookmarks() -> Vec<Bookmark> {
 // ---------------------------------------------------------------------------
 
 fn build_index(lib: &Library) -> Result<BookIndex, String> {
+    build_index_opts(lib, &NormalizeOptions::default())
+}
+
+fn build_index_opts(lib: &Library, opts: &NormalizeOptions) -> Result<BookIndex, String> {
     let index = BookIndex::in_memory().map_err(|err| err.to_string())?;
-    let opts = NormalizeOptions::default();
     let mut docs = Vec::new();
     let categories = lib.categories().map_err(|err| err.to_string())?;
     for category in &categories {
@@ -561,6 +579,12 @@ fn load_author_books(state: &mut State, author: &Author) {
     }
 }
 
+fn rebuild_index(state: &mut State) {
+    if let Some(lib) = state.lib.as_ref() {
+        state.index = build_index_opts(lib, &state.search_opts).ok();
+    }
+}
+
 fn run_search(state: &mut State) {
     state.results.clear();
     state.author_results.clear();
@@ -572,8 +596,7 @@ fn run_search(state: &mut State) {
         return;
     };
     if let Some(index) = state.index.as_ref() {
-        let opts = NormalizeOptions::default();
-        if let Ok(hits) = index.search(&query, &opts, SEARCH_LIMIT as usize) {
+        if let Ok(hits) = index.search(&query, &state.search_opts, SEARCH_LIMIT as usize) {
             for (id, _score) in hits {
                 if let Ok(Some(book)) = lib.book(id) {
                     state.results.push(book);
@@ -637,7 +660,35 @@ fn open_about(state: &mut State) {
     state.active_tab = Some(state.tabs.len() - 1);
 }
 
+/// Open a sura in the united reading pane.
+fn open_quran_tab(state: &mut State, sura: i64) {
+    let sura = sura.clamp(1, 114);
+    if let Some(position) = state.tabs.iter().position(|tab| match &tab.kind {
+        TabKind::Quran { sura: open, .. } => *open == sura,
+        _ => false,
+    }) {
+        state.active_tab = Some(position);
+        return;
+    }
+    let verses = shamela_content::quran::QuranDb::open(&quran_db())
+        .map(|db| db.sura(sura).unwrap_or_default())
+        .unwrap_or_default();
+    let name = shamela_content::quran::SURA_NAMES
+        .get(sura as usize - 1)
+        .unwrap_or(&"?");
+    state.tabs.push(Tab {
+        book_id: -(100000 + sura),
+        title: name.to_string(),
+        kind: TabKind::Quran { sura, verses },
+    });
+    state.active_tab = Some(state.tabs.len() - 1);
+}
+
 fn open_tab(state: &mut State, book_id: i64) {
+    if book_id <= -100000 {
+        open_quran_tab(state, -book_id - 100000);
+        return;
+    }
     if let Some(position) = state.tabs.iter().position(|tab| tab.book_id == book_id) {
         state.active_tab = Some(position);
         return;
@@ -867,7 +918,7 @@ fn search_book(state: &mut State) {
     if reader.pages.is_empty() {
         return;
     }
-    let opts = NormalizeOptions::default();
+    let opts = state.search_opts;
     let needle = shamela_index::normalize_arabic(&query, &opts);
     let count = reader.pages.len();
     for offset in 0..count {
@@ -883,6 +934,26 @@ fn search_book(state: &mut State) {
 }
 
 /// Export the active book to a Markdown file.
+/// Export one markdown text under a save dialog.
+fn export_text(state: &mut State, title: &str, body: &str) {
+    let safe_title: String = title
+        .chars()
+        .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+        .collect();
+    let dialog = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(format!("{safe_title}.md"));
+    let Some(path) = dialog.save_file() else {
+        state.status = String::from("export cancelled");
+        return;
+    };
+    let out = format!("# {title}\n\n{body}\n");
+    match std::fs::write(&path, out) {
+        Ok(()) => state.status = String::from("exported"),
+        Err(err) => state.status = format!("export failed: {err}"),
+    }
+}
+
 fn export_book(state: &mut State) {
     let Some(index) = state.active_tab else {
         state.status = String::from("open a book first");
@@ -921,13 +992,45 @@ fn export_book(state: &mut State) {
     }
 }
 
-/// Open the catalog card of the active tab's book.
+/// Push a card tab, focusing it when an identical one is open.
+fn push_card(state: &mut State, book_id: i64, title: String, body: String) {
+    if let Some(position) = state
+        .tabs
+        .iter()
+        .position(|tab| tab.book_id == book_id && tab.title == title)
+    {
+        state.active_tab = Some(position);
+        return;
+    }
+    state.tabs.push(Tab {
+        book_id,
+        title,
+        kind: TabKind::Card(body),
+    });
+    state.active_tab = Some(state.tabs.len() - 1);
+}
+
+/// Open the catalog card of the active tab's book (or a sura card).
 fn open_card(state: &mut State) {
     let Some(index) = state.active_tab else {
         state.status = String::from("open a book first");
         return;
     };
-    let book_id = state.tabs.get(index).map(|tab| tab.book_id).unwrap_or(-1);
+    let Some(tab) = state.tabs.get(index) else {
+        return;
+    };
+    if let TabKind::Quran { sura, verses } = &tab.kind {
+        let name = shamela_content::quran::SURA_NAMES
+            .get(*sura as usize - 1)
+            .unwrap_or(&"?");
+        let body = format!(
+            "{name}\n\nverses: {n}\n\n---\nQuran text, Uthmani edition.",
+            n = verses.len()
+        );
+        push_card(state, -1, name.to_string(), body);
+        return;
+    }
+    let book_id = tab.book_id;
     if book_id < 0 {
         state.status = String::from("open a book first");
         return;
@@ -1005,21 +1108,36 @@ fn move_page(state: &mut State, delta: isize) {
     let Some(tab) = state.tabs.get_mut(index) else {
         return;
     };
-    let TabKind::Reader(reader) = &mut tab.kind else {
-        return;
-    };
-    if reader.pages.is_empty() {
-        return;
+    match &mut tab.kind {
+        TabKind::Reader(reader) => {
+            if reader.pages.is_empty() {
+                return;
+            }
+            let last = reader.pages.len() as isize - 1;
+            reader.index = (reader.index as isize + delta).clamp(0, last) as usize;
+            reader.translation = None;
+            reader.show_translation = false;
+            reader.rendered = reader
+                .pages
+                .get(reader.index)
+                .map(|page| content_to_text(&page.content))
+                .unwrap_or_default();
+        }
+        TabKind::Quran { sura, verses } => {
+            let next = (*sura as isize + delta).clamp(1, 114) as i64;
+            if next != *sura {
+                *sura = next;
+                *verses = shamela_content::quran::QuranDb::open(&quran_db())
+                    .map(|db| db.sura(next).unwrap_or_default())
+                    .unwrap_or_default();
+                tab.title = shamela_content::quran::SURA_NAMES
+                    .get(next as usize - 1)
+                    .unwrap_or(&"?")
+                    .to_string();
+            }
+        }
+        TabKind::Card(_) => return,
     }
-    let last = reader.pages.len() as isize - 1;
-    reader.index = (reader.index as isize + delta).clamp(0, last) as usize;
-    reader.translation = None;
-    reader.show_translation = false;
-    reader.rendered = reader
-        .pages
-        .get(reader.index)
-        .map(|page| content_to_text(&page.content))
-        .unwrap_or_default();
     refresh_notes(state);
 }
 
@@ -1105,17 +1223,6 @@ fn notes_db() -> PathBuf {
     data_dir().join("notes.db")
 }
 
-fn refresh_quran(state: &mut State) {
-    state.quran_verses.clear();
-    state.quran_results.clear();
-    let Ok(db) = shamela_content::quran::QuranDb::open(&quran_db()) else {
-        return;
-    };
-    if let Ok(verses) = db.sura(state.quran_sura) {
-        state.quran_verses = verses;
-    }
-}
-
 fn download_quran(state: &mut State) {
     state.status = String::from("downloading quran edition ...");
     let verses = match shamela_import::quran_dl::fetch_edition(shamela_import::quran_dl::QURAN_URL)
@@ -1148,7 +1255,7 @@ fn download_quran(state: &mut State) {
     match db.import(&rows) {
         Ok(()) => {
             state.status = format!("quran imported: {} verses", rows.len());
-            refresh_quran(state);
+            state.quran_results.clear();
         }
         Err(err) => state.status = format!("quran import failed: {err}"),
     }
@@ -1163,8 +1270,7 @@ fn run_quran_search(state: &mut State) {
     let Ok(db) = shamela_content::quran::QuranDb::open(&quran_db()) else {
         return;
     };
-    let opts = NormalizeOptions::default();
-    let norm = shamela_index::normalize_arabic(&query, &opts);
+    let norm = shamela_index::normalize_arabic(&query, &state.search_opts);
     if let Ok(hits) = db.search(&norm, 100) {
         state.quran_results = hits;
     }
@@ -1284,29 +1390,53 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             };
         }
         Message::FocusBook => focus_book(state),
-        Message::SearchBook => search_book(state),
-        Message::ExportBook => export_book(state),
+        Message::SearchBook => {
+            let is_reader = matches!(
+                state.active_tab.and_then(|i| state.tabs.get(i)),
+                Some(tab) if matches!(tab.kind, TabKind::Reader(_))
+            );
+            if is_reader {
+                search_book(state);
+                return Task::none();
+            }
+            let query = state.query.trim().to_string();
+            if query.chars().count() < MIN_QUERY_CHARS {
+                state.status = String::from("type 2+ chars in the search box first");
+                return Task::none();
+            }
+            let needle = shamela_index::normalize_arabic(&query, &state.search_opts);
+            let Some((_, title, body)) = active_text(state) else {
+                state.status = String::from("open a book first");
+                return Task::none();
+            };
+            let hay = shamela_index::normalize_arabic(&body, &state.search_opts);
+            let count = hay.matches(&needle).count();
+            state.status = format!("{count} matches in {title}");
+            return Task::none();
+        }
+        Message::ExportBook => {
+            let is_reader = matches!(
+                state.active_tab.and_then(|i| state.tabs.get(i)),
+                Some(tab) if matches!(tab.kind, TabKind::Reader(_))
+            );
+            if is_reader {
+                export_book(state);
+            } else if let Some((_, title, body)) = active_text(state) {
+                export_text(state, &title, &body);
+            } else {
+                state.status = String::from("open a book first");
+            }
+        }
         Message::OpenCard => open_card(state),
         Message::PageFirst => move_page(state, isize::MIN),
         Message::PageLast => move_page(state, isize::MAX),
         Message::TranslatePage => translate_current(state),
         Message::CopyPage => {
-            let Some(index) = state.active_tab else {
+            let Some((_, title, body)) = active_text(state) else {
                 state.status = String::from("open a book first");
                 return Task::none();
             };
-            let Some(tab) = state.tabs.get(index) else {
-                return Task::none();
-            };
-            let TabKind::Reader(reader) = &tab.kind else {
-                state.status = String::from("open a book first");
-                return Task::none();
-            };
-            let Some(page) = reader.pages.get(reader.index) else {
-                return Task::none();
-            };
-            let body = content_to_text(&page.content);
-            let cited = format!("{}\n[{}]", body, tab.title);
+            let cited = format!("{body}\n[{title}]");
             return clipboard::write(cited);
         }
         Message::PaneResized(event) => {
@@ -1317,6 +1447,43 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ToggleNotes => {
             state.show_notes = !state.show_notes;
+        }
+        Message::ToggleSettings => {
+            state.show_settings = !state.show_settings;
+        }
+        Message::ToggleTashkeel => {
+            state.show_tashkeel = !state.show_tashkeel;
+        }
+        Message::ToggleOptHamza => {
+            state.search_opts.unify_hamza = !state.search_opts.unify_hamza;
+            rebuild_index(state);
+        }
+        Message::ToggleOptTashkeel => {
+            state.search_opts.strip_tashkeel = !state.search_opts.strip_tashkeel;
+            rebuild_index(state);
+        }
+        Message::ToggleOptTatweel => {
+            state.search_opts.strip_tatweel = !state.search_opts.strip_tatweel;
+            rebuild_index(state);
+        }
+        Message::ClearCache => {
+            let path = translations_db();
+            match std::fs::remove_file(&path) {
+                Ok(()) => state.status = String::from("translation cache cleared"),
+                Err(err) => state.status = format!("cache clear failed: {err}"),
+            }
+        }
+        Message::ResetAll => {
+            state.font_size = 22.0;
+            state.theme_kind = AppTheme::Light;
+            state.show_tashkeel = true;
+            state.search_opts = NormalizeOptions::default();
+            state.status = String::from("settings reset");
+        }
+        Message::CloseActiveTab => {
+            if let Some(index) = state.active_tab {
+                close_tab(state, index);
+            }
         }
         Message::OpenImported(name) => {
             use std::collections::hash_map::DefaultHasher;
@@ -1342,9 +1509,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 Some(tab) => match &tab.kind {
                     TabKind::Reader(reader) => match reader.pages.get(reader.index) {
                         Some(page) => {
-                            let opts = NormalizeOptions::default();
-                            let needle = shamela_index::normalize_arabic(&query, &opts);
-                            let hay = shamela_index::normalize_arabic(&page.content, &opts);
+                            let needle =
+                                shamela_index::normalize_arabic(&query, &state.search_opts);
+                            let hay =
+                                shamela_index::normalize_arabic(&page.content, &state.search_opts);
                             hay.matches(&needle).count()
                         }
                         None => 0,
@@ -1371,7 +1539,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::QuranSura(sura) => {
             state.quran_sura = sura.clamp(1, 114);
-            refresh_quran(state);
+            open_quran_tab(state, state.quran_sura);
         }
         Message::QuranSearch(query) => {
             state.quran_query = query;
@@ -1467,7 +1635,7 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
         tool_btn("export", Message::ExportBook),
         tool_btn("betaka", Message::OpenCard),
         tool_btn("upgrade", Message::PanelSelected(Panel::Downloads)),
-        tool_btn("options", Message::About),
+        tool_btn("options", Message::ToggleSettings),
         tool_btn("stop", Message::Hint("no background task")),
         tool_btn("globe", Message::PanelSelected(Panel::Downloads)),
         tool_btn(theme_icon, Message::ThemeToggle),
@@ -1617,36 +1785,28 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     let search = text_input(tr(state.lang, "quran_search"), state.quran_query.as_str())
         .on_input(Message::QuranSearch)
         .padding(8);
-    let verses: Vec<Element<'_, Message>> = if !state.quran_results.is_empty() {
-        state
+    if !state.quran_results.is_empty() {
+        let hits: Vec<Element<'_, Message>> = state
             .quran_results
             .iter()
             .map(|verse| {
                 let label = format!("S{}:{} {}", verse.sura, verse.aya, verse.text);
-                ar(label.as_str(), item_size(state.font_size))
+                list_row(
+                    label,
+                    false,
+                    Message::QuranSura(verse.sura),
+                    item_size(state.font_size),
+                )
             })
-            .collect()
-    } else {
-        state
-            .quran_verses
-            .iter()
-            .map(|verse| {
-                let label = format!("({}) {}", verse.aya, verse.text);
-                ar(label.as_str(), item_size(state.font_size))
-            })
-            .collect()
-    };
-    let head =
-        match shamela_content::quran::SURA_NAMES.get(state.quran_sura.saturating_sub(1) as usize) {
-            Some(name) => format!("{} ({})", name, state.quran_verses.len()),
-            None => String::new(),
-        };
-    let verses_view = column![ar(head.as_str(), title_size(state.font_size)), {
-        let items = verses;
-        scrollable(column(items).spacing(4)).height(Length::Fill)
-    }]
-    .spacing(4)
-    .width(Length::FillPortion(2));
+            .collect();
+        return column![
+            search,
+            scrollable(column(hits).spacing(4)).height(Length::Fill)
+        ]
+        .spacing(8)
+        .height(Length::Fill)
+        .into();
+    }
     let suras: Vec<Element<'_, Message>> = shamela_content::quran::SURA_NAMES
         .iter()
         .enumerate()
@@ -1656,74 +1816,13 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
             list_row(label, id == state.quran_sura, Message::QuranSura(id), 13.0)
         })
         .collect();
-    let sura_view = scrollable(column(suras).spacing(2))
-        .height(Length::Fill)
-        .width(Length::FillPortion(1));
     column![
         search,
-        row![verses_view, sura_view].spacing(4).height(Length::Fill)
+        scrollable(column(suras).spacing(2)).height(Length::Fill)
     ]
     .spacing(8)
     .height(Length::Fill)
     .into()
-}
-
-/// Middle sub side panel: books of the active category, author, or
-/// search — the detail to the navigation tree, like the original.
-fn books_panel(state: &State) -> Element<'_, Message> {
-    let mut items: Vec<Element<'_, Message>> =
-        vec![ar(tr(state.lang, "books"), title_size(state.font_size))];
-    if state.books.is_empty() {
-        let hint = if state.query.trim().chars().count() >= MIN_QUERY_CHARS {
-            tr(state.lang, "no_results")
-        } else {
-            tr(state.lang, "pick_section")
-        };
-        items.push(ar(hint, item_size(state.font_size)));
-    }
-    for book in state.books.iter().take(200) {
-        items.push(list_row(
-            book.name.clone(),
-            false,
-            Message::BookOpened(book.id),
-            item_size(state.font_size),
-        ));
-    }
-    scrollable(column(items).spacing(4))
-        .height(Length::Fill)
-        .into()
-}
-
-/// Control room: imported book files with sizes and deletion.
-fn control_panel(state: &State) -> Element<'_, Message> {
-    let total: u64 = state.control_files.iter().map(|(_, size)| size).sum();
-    let megabytes = total as f64 / 1_048_576.0;
-    let mut items: Vec<Element<'_, Message>> = vec![
-        ar(tr(state.lang, "control_room"), title_size(state.font_size)),
-        ar(
-            format!("{megabytes:.1} MB : {n}", n = state.control_files.len()),
-            item_size(state.font_size),
-        ),
-    ];
-    for (name, size) in &state.control_files {
-        let megabytes = *size as f64 / 1_048_576.0;
-        items.push(
-            row![
-                list_row(
-                    format!("{name} ({megabytes:.1} MB)"),
-                    false,
-                    Message::OpenImported(name.clone()),
-                    item_size(state.font_size),
-                ),
-                button(ticon("x", 16.0)).on_press(Message::DeleteBook(name.clone())),
-            ]
-            .spacing(4)
-            .into(),
-        );
-    }
-    scrollable(column(items).spacing(4))
-        .height(Length::Fill)
-        .into()
 }
 
 fn sidebar(state: &State) -> Element<'_, Message> {
@@ -1756,6 +1855,79 @@ fn sidebar(state: &State) -> Element<'_, Message> {
         .into()
 }
 
+/// Strip tashkeel marks when the user hides them (real Shamela option).
+fn apply_tashkeel(text: &str, show: bool) -> std::borrow::Cow<'_, str> {
+    if show {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(
+            text.chars()
+                .filter(|&c| !matches!(c, '\u{64b}'..='\u{652}' | '\u{670}'))
+                .collect(),
+        )
+    }
+}
+
+/// Render a sura as plain text lines.
+fn render_sura(verses: &[Verse], show_tashkeel: bool) -> String {
+    verses
+        .iter()
+        .map(|verse| {
+            format!(
+                "({}) {}",
+                verse.aya,
+                apply_tashkeel(&verse.text, show_tashkeel)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Display text of the active tab, if any: (book_id, title, body).
+fn active_text(state: &State) -> Option<(i64, String, String)> {
+    let tab = state.active_tab.and_then(|index| state.tabs.get(index))?;
+    match &tab.kind {
+        TabKind::Card(body) => Some((
+            tab.book_id,
+            tab.title.clone(),
+            apply_tashkeel(body, state.show_tashkeel).into_owned(),
+        )),
+        TabKind::Reader(reader) => {
+            let page = reader.pages.get(reader.index)?;
+            let shown = if reader.show_translation {
+                reader
+                    .translation
+                    .as_deref()
+                    .unwrap_or(reader.rendered.as_str())
+            } else {
+                reader.rendered.as_str()
+            };
+            Some((
+                tab.book_id,
+                tab.title.clone(),
+                apply_tashkeel(shown, state.show_tashkeel).into_owned(),
+            ))
+        }
+        TabKind::Quran { sura: _, verses } => {
+            let name = current_sura_name(state);
+            Some((-1, name, render_sura(verses, state.show_tashkeel)))
+        }
+    }
+}
+
+fn current_sura_name(state: &State) -> String {
+    match state.active_tab.and_then(|index| state.tabs.get(index)) {
+        Some(tab) => match &tab.kind {
+            TabKind::Quran { sura, .. } => shamela_content::quran::SURA_NAMES
+                .get(*sura as usize - 1)
+                .unwrap_or(&"?")
+                .to_string(),
+            _ => String::new(),
+        },
+        None => String::new(),
+    }
+}
+
 fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
     let font_size = state.font_size;
     let target = state.target_lang.as_str();
@@ -1771,10 +1943,14 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         None => String::from("no pages"),
     };
     let shown = if tab.show_translation {
-        tab.translation.as_deref().unwrap_or(tab.rendered.as_str())
+        tab.translation
+            .as_deref()
+            .unwrap_or(tab.rendered.as_str())
+            .to_string()
     } else {
-        tab.rendered.as_str()
+        tab.rendered.clone()
     };
+    let shown = apply_tashkeel(&shown, state.show_tashkeel).into_owned();
     let nav = row![
         button(ticon("next", 18.0)).on_press(Message::ReaderNext),
         text(label).font(AMIRI).size(16.0),
@@ -1891,6 +2067,35 @@ fn reader(state: &State) -> Element<'_, Message> {
     let content: Element<'_, Message> =
         match state.active_tab.and_then(|index| state.tabs.get(index)) {
             Some(tab) => match &tab.kind {
+                TabKind::Quran { sura, verses } => {
+                    let name = shamela_content::quran::SURA_NAMES
+                        .get(*sura as usize - 1)
+                        .unwrap_or(&"?");
+                    let head = format!("{name} ({})", verses.len());
+                    let body_text = render_sura(verses, state.show_tashkeel);
+                    column![
+                        row![
+                            tool_btn("bkmrk", Message::BookmarkAdd),
+                            tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
+                        ]
+                        .spacing(8),
+                        row![
+                            button(ticon("prev", 18.0)).on_press(Message::ReaderPrev),
+                            button(ticon("next", 18.0)).on_press(Message::ReaderNext),
+                        ]
+                        .spacing(8),
+                        scrollable(
+                            text(format!("{head}\n\n{body_text}"))
+                                .font(AMIRI)
+                                .size(state.font_size)
+                                .shaping(Shaping::Advanced)
+                                .width(Length::Fill),
+                        )
+                        .height(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .into()
+                }
                 TabKind::Card(body) => column![
                     row![
                         tool_btn("bkmrk", Message::BookmarkAdd),
@@ -1898,7 +2103,7 @@ fn reader(state: &State) -> Element<'_, Message> {
                     ]
                     .spacing(8),
                     scrollable(
-                        text(body.as_str())
+                        text(apply_tashkeel(body, state.show_tashkeel).into_owned())
                             .font(AMIRI)
                             .size(state.font_size)
                             .shaping(Shaping::Advanced)
@@ -1970,6 +2175,116 @@ fn status_bar(state: &State) -> Element<'_, Message> {
     .into()
 }
 
+/// Settings popup: every option works (display, search, data).
+fn settings_modal(state: &State) -> Element<'_, Message> {
+    let title = row![
+        ticon("options", 22.0),
+        ar(tr(state.lang, "settings"), 18.0),
+        Space::with_width(Length::Fill),
+        button(ticon("x", 18.0)).on_press(Message::ToggleSettings),
+    ]
+    .spacing(8);
+    let font_row = row![
+        button(ar("A-", 14.0)).on_press(Message::FontSmaller),
+        ar(format!("{}", state.font_size as i64), 15.0),
+        button(ar("A+", 14.0)).on_press(Message::FontBigger),
+        button(ticon(
+            match state.theme_kind {
+                AppTheme::Light => "moon",
+                AppTheme::Dark => "sun",
+            },
+            20.0
+        ))
+        .on_press(Message::ThemeToggle),
+        button(ar(state.lang.code(), 14.0)).on_press(Message::LangCycle),
+    ]
+    .spacing(8);
+    let card = column![
+        title,
+        ar(tr(state.lang, "display"), 16.0),
+        font_row,
+        toggle_row(
+            tr(state.lang, "show_tashkeel").to_string(),
+            state.show_tashkeel,
+            Message::ToggleTashkeel
+        ),
+        ar(tr(state.lang, "search_options"), 16.0),
+        toggle_row(
+            tr(state.lang, "unify_hamza").to_string(),
+            state.search_opts.unify_hamza,
+            Message::ToggleOptHamza
+        ),
+        toggle_row(
+            tr(state.lang, "ignore_tashkeel").to_string(),
+            state.search_opts.strip_tashkeel,
+            Message::ToggleOptTashkeel
+        ),
+        toggle_row(
+            tr(state.lang, "strip_tatweel").to_string(),
+            state.search_opts.strip_tatweel,
+            Message::ToggleOptTatweel
+        ),
+        ar(tr(state.lang, "data_section"), 16.0),
+        button(ar(tr(state.lang, "clear_cache"), 14.0))
+            .on_press(Message::ClearCache)
+            .width(Length::Fill),
+        button(ar(tr(state.lang, "reset_all"), 14.0))
+            .on_press(Message::ResetAll)
+            .width(Length::Fill),
+    ]
+    .spacing(8)
+    .padding(4)
+    .width(Length::Fixed(430.0));
+    let boxed = container(card)
+        .padding(18)
+        .width(Length::Fixed(466.0))
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 1.0))),
+            ..container::Style::default()
+        });
+    container(column![
+        Space::with_height(Length::Fill),
+        row![
+            Space::with_width(Length::Fill),
+            boxed,
+            Space::with_width(Length::Fill),
+        ],
+        Space::with_height(Length::Fill),
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// Toggle row with ASCII state box (always renders) plus label.
+fn toggle_row(label: String, on: bool, msg: Message) -> Element<'static, Message> {
+    let mark = if on { "[x]" } else { "[ ]" };
+    button(ar(format!("{mark} {label}"), 15.0))
+        .on_press(msg)
+        .style(button::text)
+        .width(Length::Fill)
+        .padding(6)
+        .into()
+}
+
+/// Global hotkeys mirroring the classic program (F5/F6 pages, F3 search,
+/// F10 import dialog, Esc closes the current tab).
+fn hotkey(key: keyboard::Key, _mods: keyboard::Modifiers) -> Option<Message> {
+    use iced::keyboard::key::Named;
+    match key {
+        keyboard::Key::Named(Named::F5) => Some(Message::ReaderNext),
+        keyboard::Key::Named(Named::F6) => Some(Message::ReaderPrev),
+        keyboard::Key::Named(Named::F3) => Some(Message::PanelSelected(Panel::Library)),
+        keyboard::Key::Named(Named::F10) => Some(Message::ImportBok),
+        keyboard::Key::Named(Named::Escape) => Some(Message::CloseActiveTab),
+        _ => None,
+    }
+}
+
 fn view(state: &State) -> Element<'_, Message> {
     let top = tool_bar(state);
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
@@ -1987,7 +2302,17 @@ fn view(state: &State) -> Element<'_, Message> {
         .on_resize(10.0, Message::PaneResized)
         .into()
     };
-    column![top, body, status_bar(state)].into()
+    let content = column![top, body, status_bar(state)];
+    if state.show_settings {
+        Stack::new()
+            .push(content)
+            .push(settings_modal(state))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else {
+        content.into()
+    }
 }
 
 fn theme(state: &State) -> Theme {
@@ -2003,6 +2328,7 @@ fn main() -> iced::Result {
         std::process::exit(self_test(&args[2], &args[3]));
     }
     iced::application("ShamelaCraft", update, view)
+        .subscription(|_| iced::keyboard::on_key_press(hotkey))
         .theme(theme)
         .font(include_bytes!("../assets/fonts/Amiri-Regular.ttf"))
         .run()
