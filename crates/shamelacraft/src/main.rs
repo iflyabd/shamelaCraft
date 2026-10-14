@@ -26,6 +26,7 @@ enum Panel {
     #[default]
     Library,
     Bookmarks,
+    Downloads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,7 @@ struct ReaderTab {
     pages: Vec<shamela_content::book::Page>,
     index: usize,
     toc: Vec<TocNode>,
+    rendered: String,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +86,9 @@ enum Message {
     ReaderPrev,
     ReaderNext,
     TocJump(usize),
+    DownloadIdInput(String),
+    DownloadList,
+    DownloadFile(String),
     FontBigger,
     FontSmaller,
     ThemeSelected(AppTheme),
@@ -101,6 +106,8 @@ struct State {
     active_tab: Option<usize>,
     bookmarks: Vec<Bookmark>,
     panel: Panel,
+    dl_id: String,
+    dl_files: Vec<shamela_import::archive::ArchiveFile>,
     font_size: f32,
     theme_kind: AppTheme,
     status: String,
@@ -121,6 +128,8 @@ impl Default for State {
             active_tab: None,
             bookmarks,
             panel: Panel::Library,
+            dl_id: String::from("shamela-16241"),
+            dl_files: Vec::new(),
             font_size: 20.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
@@ -361,7 +370,7 @@ fn import_bok(state: &mut State) {
         state.status = format!("تعذر التحويل: {err}");
         return;
     }
-    let pages = match BookDb::open(&out) {
+    let (pages, toc) = match BookDb::open(&out) {
         Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
         Err(err) => {
             state.status = format!("تعذر فتح المحوَّل: {err}");
@@ -373,18 +382,106 @@ fn import_bok(state: &mut State) {
     } else {
         book.meta.title.clone()
     };
-    let count = pages.0.len();
+    open_imported_pages(state, pages, toc, title, book.meta.id);
+}
+
+/// Open converted pages + TOC in a reader tab.
+fn open_imported_pages(
+    state: &mut State,
+    pages: Vec<shamela_content::book::Page>,
+    toc: Vec<shamela_content::book::TocNode>,
+    title: String,
+    book_id: i64,
+) {
+    if pages.is_empty() {
+        state.status = String::from("no pages");
+        return;
+    }
+    let rendered = pages
+        .first()
+        .map(|page| content_to_text(&page.content))
+        .unwrap_or_default();
+    let count = pages.len();
     state.tabs.push(Tab {
-        book_id: book.meta.id,
+        book_id,
         title: title.clone(),
         kind: TabKind::Reader(ReaderTab {
-            pages: pages.0,
+            pages,
             index: 0,
-            toc: pages.1,
+            toc,
+            rendered,
         }),
     });
     state.active_tab = Some(state.tabs.len() - 1);
-    state.status = format!("تم استيراد {title}: {count} صفحة");
+    state.status = format!("imported {title}: {count} pages");
+}
+
+/// Open a converted `Page`/`Title` database file in a reader tab.
+fn open_imported_db(state: &mut State, out: &std::path::Path, title: String, book_id: i64) {
+    let (pages, toc) = match BookDb::open(out) {
+        Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
+        Err(err) => {
+            state.status = format!("open converted failed: {err}");
+            return;
+        }
+    };
+    open_imported_pages(state, pages, toc, title, book_id);
+}
+
+/// Refresh the `.bok` file list of the configured archive.org item.
+fn refresh_download_list(state: &mut State) {
+    let id = state.dl_id.trim().to_string();
+    if id.is_empty() {
+        state.status = String::from("enter an archive.org item id");
+        return;
+    }
+    match shamela_import::archive::item_files(&id) {
+        Ok(files) => {
+            let boks = shamela_import::archive::bok_files(&files);
+            let count = boks.len();
+            state.dl_files = boks.into_iter().cloned().collect();
+            state.status = format!("item {id}: {count} BOK files");
+        }
+        Err(err) => {
+            state.dl_files.clear();
+            state.status = format!("fetch failed: {err}");
+        }
+    }
+}
+
+/// Download one `.bok` from the configured item, convert, and open it.
+fn download_file(state: &mut State, name: String) {
+    let id = state.dl_id.trim().to_string();
+    let url = shamela_import::archive::download_url(&id, &name);
+    let dest = books_dir().join(&name);
+    state.status = format!("downloading: {name} ...");
+    if let Err(err) = shamela_import::archive::download_to(&url, &dest) {
+        state.status = format!("download failed: {err}");
+        return;
+    }
+    let stem = dest
+        .file_stem()
+        .and_then(|part| part.to_str())
+        .unwrap_or("book")
+        .to_string();
+    let out = books_dir().join(format!("{stem}.db"));
+    let book = match shamela_import::bok::open_bok(&dest) {
+        Ok(book) => book,
+        Err(err) => {
+            state.status = format!("BOK read failed: {err}");
+            return;
+        }
+    };
+    let title = if book.meta.title.is_empty() {
+        stem
+    } else {
+        book.meta.title.clone()
+    };
+    let book_id = book.meta.id;
+    match shamela_import::convert::bok_to_book_db(&book, &out) {
+        Ok(()) => open_imported_db(state, &out, title, book_id),
+        Err(err) => state.status = format!("convert failed: {err}"),
+    }
 }
 
 fn move_page(state: &mut State, delta: isize) {
@@ -402,6 +499,11 @@ fn move_page(state: &mut State, delta: isize) {
     }
     let last = reader.pages.len() as isize - 1;
     reader.index = (reader.index as isize + delta).clamp(0, last) as usize;
+    reader.rendered = reader
+        .pages
+        .get(reader.index)
+        .map(|page| content_to_text(&page.content))
+        .unwrap_or_default();
 }
 
 fn jump_to_page(state: &mut State, target: usize) {
@@ -416,6 +518,11 @@ fn jump_to_page(state: &mut State, target: usize) {
     };
     if target < reader.pages.len() {
         reader.index = target;
+        reader.rendered = reader
+            .pages
+            .get(target)
+            .map(|page| content_to_text(&page.content))
+            .unwrap_or_default();
     }
 }
 
@@ -497,6 +604,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ReaderPrev => move_page(state, -1),
         Message::ReaderNext => move_page(state, 1),
         Message::TocJump(target) => jump_to_page(state, target),
+        Message::DownloadIdInput(id) => {
+            state.dl_id = id;
+        }
+        Message::DownloadList => refresh_download_list(state),
+        Message::DownloadFile(name) => download_file(state, name),
         Message::FontBigger => {
             state.font_size = (state.font_size + 1.0).min(34.0);
         }
@@ -620,6 +732,33 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
         .into()
 }
 
+fn downloads_panel(state: &State) -> Element<'_, Message> {
+    let input = text_input("archive.org item id ...", state.dl_id.as_str())
+        .on_input(Message::DownloadIdInput)
+        .padding(8);
+    let fetch = button(text("list books").font(AMIRI))
+        .on_press(Message::DownloadList)
+        .width(Length::Fill);
+    let mut items: Vec<Element<'_, Message>> = vec![input.into(), fetch.into()];
+    for file in &state.dl_files {
+        let megabytes = file.size as f64 / 1_048_576.0;
+        let label = format!("{} ({megabytes:.1} MB)", file.name);
+        items.push(
+            button(
+                text(label)
+                    .font(AMIRI)
+                    .size((state.font_size - 4.0).max(12.0)),
+            )
+            .on_press(Message::DownloadFile(file.name.clone()))
+            .width(Length::Fill)
+            .into(),
+        );
+    }
+    scrollable(column(items).spacing(4))
+        .height(Length::Fill)
+        .into()
+}
+
 fn sidebar(state: &State) -> Element<'_, Message> {
     let search = text_input("بحث في الكتب والمؤلفين …", state.query.as_str())
         .on_input(Message::SearchInput)
@@ -628,6 +767,8 @@ fn sidebar(state: &State) -> Element<'_, Message> {
         book_buttons(state, &state.results)
     } else if state.panel == Panel::Bookmarks {
         bookmark_list(state)
+    } else if state.panel == Panel::Downloads {
+        downloads_panel(state)
     } else {
         library_tree(state)
     };
@@ -639,19 +780,16 @@ fn sidebar(state: &State) -> Element<'_, Message> {
 }
 
 fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
-    let (label, body) = match tab.pages.get(tab.index) {
+    let label = match tab.pages.get(tab.index) {
         Some(page) => {
             let position = format!("صفحة {} من {}", tab.index + 1, tab.pages.len());
             let origin = match (&page.part, &page.page) {
                 (Some(part), Some(number)) => format!(" (جزء {part} — صفحة {number})"),
                 _ => String::new(),
             };
-            (
-                format!("{position}{origin}"),
-                content_to_text(&page.content),
-            )
+            format!("{position}{origin}")
         }
-        None => (String::from("لا صفحات"), String::new()),
+        None => String::from("لا صفحات"),
     };
     let nav = row![
         button(text("التالي").font(AMIRI)).on_press(Message::ReaderNext),
@@ -662,7 +800,7 @@ fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
     let page_view = column![
         nav,
         scrollable(
-            text(body.as_str())
+            text(tab.rendered.as_str())
                 .font(AMIRI)
                 .size(font_size)
                 .width(Length::Fill),
@@ -773,6 +911,7 @@ fn view(state: &State) -> Element<'_, Message> {
         text("شاملة كرافت").font(AMIRI).size(24.0),
         button(text("فتح قاعدة البيانات").font(AMIRI)).on_press(Message::OpenDatabase),
         button(text("استيراد BOK").font(AMIRI)).on_press(Message::ImportBok),
+        button(text("تحميل").font(AMIRI)).on_press(Message::PanelSelected(Panel::Downloads)),
         button(text("المكتبة").font(AMIRI)).on_press(Message::PanelSelected(Panel::Library)),
         button(text("المفضلة").font(AMIRI)).on_press(Message::PanelSelected(Panel::Bookmarks)),
         button(text("A+").font(AMIRI)).on_press(Message::FontBigger),

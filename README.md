@@ -16,7 +16,8 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - Tabbed catalog cards (title, authors, death dates, print status)
 - Legacy `.bok` import (pure-Rust Jet/MDB reader) into local `Page`/`Title`
   databases, with full-text reader tabs, page navigation, and TOC jumping
-- Keyless acquisition helpers for public archive.org Shamela collections
+- Keyless acquisition from public archive.org Shamela collections, with an
+  in-app downloads panel (list `.bok` files, one-click download + import)
 - Persistent bookmarks (`~/.shamelacraft/bookmarks.db`)
 - RTL-first layout, bundled Amiri font (SIL OFL), light/dark themes,
   adjustable font size
@@ -58,6 +59,49 @@ Run the test-suite (uses an in-memory fixture, no proprietary data needed):
 ```sh
 cargo test --workspace
 ```
+
+## Installation
+
+Download a ready build from
+[Releases](https://github.com/iflyabd/shamelaCraft/releases) (published from
+tags like `v0.1.0` — Linux x86-64/ARM64, Windows x86-64, macOS ARM64), or build
+from source with stable Rust (1.85+). Debian/Ubuntu needs one system package
+for the file picker:
+
+```sh
+sudo apt install pkg-config libgtk-3-dev
+cargo build --release -p shamelacraft
+./target/release/shamelacraft
+```
+
+Pure Rust throughout: no C database drivers (SQLite via `rusqlite/bundled`,
+Access/Jet via `jetdb`), TLS via rustls. The same code builds on every OS
+and CPU architecture without emulation.
+
+## Getting books
+
+Three keyless paths, all offline-friendly after the first fetch:
+
+1. **In-app downloads (easiest).** Open the تحميل panel, keep or change the
+   archive.org item id (e.g. `shamela-16241`, `shamela-13700`, `golden-shamela_202601`),
+   list the `.bok` files, and download any book — it converts to the local
+   `Page`/`Title` format and opens in a reader tab automatically.
+2. **Local `.bok` files.** Use استيراد BOK to convert any legacy `.bok`
+   (Jet3/MDB, Windows-1256) with the pure-Rust importer.
+3. **Official per-book databases** (needs a free API key from mail@shamela.ws)
+   open directly: they already use the `Page`/`Title` schema this reader
+   implements.
+
+All imports land in `~/.shamelacraft/books/*.db` and are indexed for
+tolerant Arabic search.
+
+## Platform support
+
+| OS | x86-64 | ARM64 |
+|----|--------|-------|
+| Linux | ✅ release + CI | ✅ release + CI (native, no box64) |
+| Windows | ✅ release | ✅ builds from source |
+| macOS | ✅ builds from source | ✅ release |
 
 ## Layout
 
