@@ -64,7 +64,7 @@ SIL Open Font License 1.1 (`crates/shamelacraft/assets/fonts/OFL.txt`).
 
 ## Credits
 
-- Idea: **صقر قريش (Arab Falcon)**
+- Idea: **عبد القادر الجزائري (Abdelkader El Djazairi)** — known as **صقر قريش (Arab Falcon)**
 
 ## License
 
@@ -82,7 +82,7 @@ MIT — see [LICENSE-MIT](LICENSE-MIT).
 
 ### الشكر والتقدير
 
-- الفكرة: **صقر قريش (Arab Falcon)**
+- الفكرة: **عبد القادر الجزائري** — المعروف بـ **صقر قريش (Arab Falcon)**
 
 ### المزايا (الإصدار ٠٫١)
 
