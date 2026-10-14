@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn preserves_unmapped_as_placeholders() {
-        assert_eq!(decode_bytes(Some(&[0xAB])), "[ab]");
+        assert_eq!(decode_bytes(Some(&[0x01])), "[01]");
         assert!(has_unmapped("نص [ab]"));
         assert!(!has_unmapped("نص سليم"));
         assert_eq!(unmapped_bytes("x [ab] y [AB] z [cd]"), vec![0xAB, 0xCD]);

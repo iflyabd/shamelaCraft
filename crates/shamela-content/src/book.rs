@@ -40,6 +40,18 @@ pub struct TocNode {
     pub children: Vec<TocNode>,
 }
 
+/// Read any SQLite cell as text. The `Title.page` / `Title.parent` columns
+/// are INTEGER in real databases, so strict TEXT decoding would fail.
+fn cell_text(value: rusqlite::types::Value) -> Option<String> {
+    match value {
+        rusqlite::types::Value::Null => None,
+        rusqlite::types::Value::Integer(num) => Some(num.to_string()),
+        rusqlite::types::Value::Real(num) => Some(num.to_string()),
+        rusqlite::types::Value::Text(text) => Some(text),
+        rusqlite::types::Value::Blob(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+    }
+}
+
 /// An open per-book database file. Always read-only.
 pub struct BookDb {
     conn: Connection,
@@ -119,8 +131,8 @@ impl BookDb {
             Ok(Title {
                 id: row.get(0)?,
                 content: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                page: row.get(2)?,
-                parent: row.get(3)?,
+                page: cell_text(row.get(2)?),
+                parent: cell_text(row.get(3)?),
             })
         })?;
         rows.collect()
