@@ -102,7 +102,7 @@ impl BookDb {
                 number: row.get(4)?,
             })
         })?;
-        Ok(rows.next().transpose()?)
+        rows.next().transpose()
     }
 
     /// All live titles in order.

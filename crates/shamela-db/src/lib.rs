@@ -119,7 +119,7 @@ impl Library {
         let sql = format!("SELECT {} FROM book WHERE book_id = ?1", Self::BOOK_COLS);
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![book_id], Self::book_from_row)?;
-        Ok(rows.next().transpose()?)
+        rows.next().transpose()
     }
 
     /// A single author by id, if present.
@@ -137,7 +137,7 @@ impl Library {
                 death_text: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
             })
         })?;
-        Ok(rows.next().transpose()?)
+        rows.next().transpose()
     }
 
     /// Main author plus co-authors of a book.
