@@ -9,10 +9,9 @@
 //! legacy `.bok` files, and archive.org collections. Full-text content
 //! providers beyond `.bok`/API databases are on the roadmap.
 
+use iced::widget::svg::{Handle, Svg};
 use iced::widget::text::Shaping;
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_input, Space,
-};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Element, Font, Length, Task, Theme};
 use shamela_content::book::{BookDb, TocNode};
 use shamela_content::html::content_to_text;
@@ -26,11 +25,14 @@ const SEARCH_LIMIT: i64 = 100;
 const MIN_QUERY_CHARS: usize = 2;
 const SIDEBAR_WIDTH: f32 = 320.0;
 
-const ABOUT_TEXT: &str = "شاملة كرافت — قارئ مكتبة عربي خفيف ومفتوح المصدر\n\n\
-    يقرأ فهرس master.db للقراءة فقط، وكتب BOK القديمة، ومجموعات archive.org.\n\
-    البحث العربي متسامح مع التشكيل والهمز والتطويل.\n\n\
-    الفكرة: عبد القادر الجزائري — المعروف بصقر قريش\n\
-    التنفيذ: إعادة كتابة نظيفة بلغة Rust، بلا أي شيفرة أو أصول مملوكة.";
+const ABOUT_TEXT: &str = "v0.1 ShamelaCraft - lightweight Arabic library reader\n\n\
+    - master.db read-only catalog (categories, books, authors)\n\
+    - legacy BOK import, pure-Rust Jet reader\n\
+    - archive.org keyless downloads (bok, zip, tar, rar)\n\
+    - tolerant Arabic search (tashkeel, hamza, tatweel)\n\
+    - tabs, bookmarks, themes, export to markdown\n\n\
+    - idea: Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
+    - clean-room Rust, no proprietary code or assets";
 
 const WELCOME_TEXT: &str =
     "اختر مصدرا للبدء: افتح master.db من نسختك، أو استورد كتاب BOK، أو حمّل من archive.org.";
@@ -108,7 +110,14 @@ enum Message {
     DownloadFile(String),
     FontBigger,
     FontSmaller,
-    ThemeSelected(AppTheme),
+    ThemeToggle,
+    FocusBook,
+    SearchBook,
+    ExportBook,
+    OpenCard,
+    PageFirst,
+    PageLast,
+    Hint(&'static str),
 }
 
 struct State {
@@ -120,6 +129,7 @@ struct State {
     authors: Vec<Author>,
     active_author: Option<i64>,
     query: String,
+    last_query: String,
     results: Vec<Book>,
     author_results: Vec<Author>,
     tabs: Vec<Tab>,
@@ -145,6 +155,7 @@ impl Default for State {
             authors: Vec::new(),
             active_author: None,
             query: String::new(),
+            last_query: String::new(),
             results: Vec::new(),
             author_results: Vec::new(),
             tabs: Vec::new(),
@@ -180,6 +191,53 @@ fn ar(content: impl Into<String>, size: f32) -> Element<'static, Message> {
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
+
+/// Original toolbar icon by name (24px line icons drawn for this project).
+fn ticon(name: &'static str, px: f32) -> Element<'static, Message> {
+    let handle = match name {
+        "selbk" => Handle::from_memory(&include_bytes!("../assets/icons/selbk.svg")[..]),
+        "display" => Handle::from_memory(&include_bytes!("../assets/icons/display.svg")[..]),
+        "tree" => Handle::from_memory(&include_bytes!("../assets/icons/tree.svg")[..]),
+        "com" => Handle::from_memory(&include_bytes!("../assets/icons/com.svg")[..]),
+        "searchpage" => Handle::from_memory(&include_bytes!("../assets/icons/searchpage.svg")[..]),
+        "searchbok" => Handle::from_memory(&include_bytes!("../assets/icons/searchbok.svg")[..]),
+        "search" => Handle::from_memory(&include_bytes!("../assets/icons/search.svg")[..]),
+        "lastsearch" => Handle::from_memory(&include_bytes!("../assets/icons/lastsearch.svg")[..]),
+        "saved" => Handle::from_memory(&include_bytes!("../assets/icons/saved.svg")[..]),
+        "first" => Handle::from_memory(&include_bytes!("../assets/icons/first.svg")[..]),
+        "prev" => Handle::from_memory(&include_bytes!("../assets/icons/prev.svg")[..]),
+        "next" => Handle::from_memory(&include_bytes!("../assets/icons/next.svg")[..]),
+        "last" => Handle::from_memory(&include_bytes!("../assets/icons/last.svg")[..]),
+        "dipquran" => Handle::from_memory(&include_bytes!("../assets/icons/dipquran.svg")[..]),
+        "sharh" => Handle::from_memory(&include_bytes!("../assets/icons/sharh.svg")[..]),
+        "import" => Handle::from_memory(&include_bytes!("../assets/icons/import.svg")[..]),
+        "ctr" => Handle::from_memory(&include_bytes!("../assets/icons/ctr.svg")[..]),
+        "authors" => Handle::from_memory(&include_bytes!("../assets/icons/authors.svg")[..]),
+        "copy" => Handle::from_memory(&include_bytes!("../assets/icons/copy.svg")[..]),
+        "bkmrk" => Handle::from_memory(&include_bytes!("../assets/icons/bkmrk.svg")[..]),
+        "export" => Handle::from_memory(&include_bytes!("../assets/icons/export.svg")[..]),
+        "betaka" => Handle::from_memory(&include_bytes!("../assets/icons/betaka.svg")[..]),
+        "upgrade" => Handle::from_memory(&include_bytes!("../assets/icons/upgrade.svg")[..]),
+        "options" => Handle::from_memory(&include_bytes!("../assets/icons/options.svg")[..]),
+        "stop" => Handle::from_memory(&include_bytes!("../assets/icons/stop.svg")[..]),
+        "sun" => Handle::from_memory(&include_bytes!("../assets/icons/sun.svg")[..]),
+        "moon" => Handle::from_memory(&include_bytes!("../assets/icons/moon.svg")[..]),
+        "x" => Handle::from_memory(&include_bytes!("../assets/icons/x.svg")[..]),
+        "globe" => Handle::from_memory(&include_bytes!("../assets/icons/globe.svg")[..]),
+        "help" => Handle::from_memory(&include_bytes!("../assets/icons/help.svg")[..]),
+        "plus" => Handle::from_memory(&include_bytes!("../assets/icons/plus.svg")[..]),
+        _ => Handle::from_memory(&include_bytes!("../assets/icons/help.svg")[..]),
+    };
+    Svg::new(handle)
+        .width(Length::Fixed(px))
+        .height(Length::Fixed(px))
+        .into()
+}
+
+/// Icon toolbar button.
+fn tool_btn(icon: &'static str, msg: Message) -> Element<'static, Message> {
+    button(ticon(icon, 22.0)).on_press(msg).padding(5).into()
+}
 
 fn data_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
@@ -656,6 +714,108 @@ fn download_file(state: &mut State, name: String) {
     import_bok_file(state, &dest, stem);
 }
 
+/// Focus the first open book tab (mirrors "display active book").
+fn focus_book(state: &mut State) {
+    if let Some(position) = state
+        .tabs
+        .iter()
+        .position(|tab| matches!(tab.kind, TabKind::Reader(_)))
+    {
+        state.active_tab = Some(position);
+    } else {
+        state.status = String::from("open a book first");
+    }
+}
+
+/// Search the query inside the active book, jumping to the first match.
+fn search_book(state: &mut State) {
+    let query = state.query.trim().to_string();
+    if query.chars().count() < MIN_QUERY_CHARS {
+        state.status = String::from("type 2+ chars in the search box first");
+        return;
+    }
+    let Some(index) = state.active_tab else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    let Some(tab) = state.tabs.get(index) else {
+        return;
+    };
+    let TabKind::Reader(reader) = &tab.kind else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    if reader.pages.is_empty() {
+        return;
+    }
+    let opts = NormalizeOptions::default();
+    let needle = shamela_index::normalize_arabic(&query, &opts);
+    let count = reader.pages.len();
+    for offset in 0..count {
+        let at = (reader.index + offset) % count;
+        let hay = shamela_index::normalize_arabic(&reader.pages[at].content, &opts);
+        if hay.contains(&needle) {
+            jump_to_page(state, at);
+            state.status = format!("match on page {}", at + 1);
+            return;
+        }
+    }
+    state.status = String::from("not found in this book");
+}
+
+/// Export the active book to a Markdown file.
+fn export_book(state: &mut State) {
+    let Some(index) = state.active_tab else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    let Some(tab) = state.tabs.get(index) else {
+        return;
+    };
+    let TabKind::Reader(reader) = &tab.kind else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    if reader.pages.is_empty() {
+        return;
+    }
+    let safe_title: String = tab
+        .title
+        .chars()
+        .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+        .collect();
+    let dialog = rfd::FileDialog::new()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(format!("{safe_title}.md"));
+    let Some(path) = dialog.save_file() else {
+        state.status = String::from("export cancelled");
+        return;
+    };
+    let mut out = format!("# {}\n\n", tab.title);
+    for page in &reader.pages {
+        out.push_str(&content_to_text(&page.content));
+        out.push_str("\n\n---\n\n");
+    }
+    match std::fs::write(&path, out) {
+        Ok(()) => state.status = format!("exported {}", reader.pages.len()),
+        Err(err) => state.status = format!("export failed: {err}"),
+    }
+}
+
+/// Open the catalog card of the active tab's book.
+fn open_card(state: &mut State) {
+    let Some(index) = state.active_tab else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    let book_id = state.tabs.get(index).map(|tab| tab.book_id).unwrap_or(-1);
+    if book_id < 0 {
+        state.status = String::from("open a book first");
+        return;
+    }
+    open_tab(state, book_id);
+}
+
 fn move_page(state: &mut State, delta: isize) {
     let Some(index) = state.active_tab else {
         return;
@@ -755,7 +915,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ImportBok => import_bok(state),
         Message::About => open_about(state),
         Message::SearchInput(query) => {
-            state.query = query;
+            state.query = query.clone();
+            if query.trim().chars().count() >= MIN_QUERY_CHARS {
+                state.last_query = query;
+            }
             run_search(state);
         }
         Message::CategorySelected(id) => {
@@ -798,8 +961,20 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::FontSmaller => {
             state.font_size = (state.font_size - 1.0).max(14.0);
         }
-        Message::ThemeSelected(theme) => {
-            state.theme_kind = theme;
+        Message::ThemeToggle => {
+            state.theme_kind = match state.theme_kind {
+                AppTheme::Light => AppTheme::Dark,
+                AppTheme::Dark => AppTheme::Light,
+            };
+        }
+        Message::FocusBook => focus_book(state),
+        Message::SearchBook => search_book(state),
+        Message::ExportBook => export_book(state),
+        Message::OpenCard => open_card(state),
+        Message::PageFirst => move_page(state, isize::MIN),
+        Message::PageLast => move_page(state, isize::MAX),
+        Message::Hint(text) => {
+            state.status = text.to_string();
         }
     }
     Task::none()
@@ -817,51 +992,56 @@ fn item_size(base: f32) -> f32 {
     (base - 4.0).max(12.0)
 }
 
-fn menu_bar() -> Element<'static, Message> {
-    let file = button(ar("ملف", 14.0)).on_press(Message::OpenDatabase);
-    let search = button(ar("بحث", 14.0)).on_press(Message::PanelSelected(Panel::Library));
-    let screens = button(ar("شاشات", 14.0)).on_press(Message::PanelSelected(Panel::Library));
-    let services = button(ar("خدمات", 14.0)).on_press(Message::PanelSelected(Panel::Downloads));
-    let upgrade = button(ar("ترقية حية", 14.0)).on_press(Message::PanelSelected(Panel::Downloads));
-    let windows = button(ar("نوافذ", 14.0)).on_press(Message::PanelSelected(Panel::Bookmarks));
-    let help = button(ar("مساعدة", 14.0)).on_press(Message::About);
-    let items = vec![
-        file.into(),
-        search.into(),
-        screens.into(),
-        services.into(),
-        upgrade.into(),
-        windows.into(),
-        help.into(),
-    ];
-    row(items).spacing(4).padding(4).into()
-}
-
+/// Icon toolbar mirroring the classic Shamela PC button order.
+/// Buttons needing an active book explain so, exactly like the original.
 fn tool_bar(state: &State) -> Element<'_, Message> {
-    let pick_book =
-        button(ar("اختيار كتاب", 14.0)).on_press(Message::PanelSelected(Panel::Library));
-    let authors = button(ar("مؤلفون", 14.0)).on_press(Message::PanelSelected(Panel::Authors));
-    let marks = button(ar("إشارات", 14.0)).on_press(Message::PanelSelected(Panel::Bookmarks));
-    let downloads = button(ar("تحميل", 14.0)).on_press(Message::PanelSelected(Panel::Downloads));
-    let import = button(ar("استيراد", 14.0)).on_press(Message::ImportBok);
-    let bigger = button(ar("A+", 14.0)).on_press(Message::FontBigger);
-    let smaller = button(ar("A-‏", 14.0)).on_press(Message::FontSmaller);
-    let theme = pick_list(
-        vec![AppTheme::Light, AppTheme::Dark],
-        Some(state.theme_kind),
-        Message::ThemeSelected,
-    );
-    let items = vec![
-        pick_book.into(),
-        authors.into(),
-        marks.into(),
-        downloads.into(),
-        import.into(),
-        bigger.into(),
-        smaller.into(),
-        theme.into(),
-    ];
-    row(items).spacing(6).padding(4).into()
+    let theme_icon = match state.theme_kind {
+        AppTheme::Light => "moon",
+        AppTheme::Dark => "sun",
+    };
+    let row_one = row![
+        tool_btn("selbk", Message::PanelSelected(Panel::Library)),
+        tool_btn("display", Message::FocusBook),
+        tool_btn("tree", Message::PanelSelected(Panel::Library)),
+        tool_btn("com", Message::Hint("comments: roadmap")),
+        tool_btn("searchpage", Message::SearchBook),
+        tool_btn("searchbok", Message::SearchBook),
+        tool_btn("search", Message::PanelSelected(Panel::Library)),
+        tool_btn(
+            "lastsearch",
+            Message::Hint("type to search; history: roadmap")
+        ),
+        tool_btn("saved", Message::PanelSelected(Panel::Bookmarks)),
+        tool_btn("first", Message::PageFirst),
+        tool_btn("prev", Message::ReaderPrev),
+        tool_btn("next", Message::ReaderNext),
+        tool_btn("last", Message::PageLast),
+        tool_btn("dipquran", Message::Hint("quran services: roadmap")),
+        tool_btn("sharh", Message::Hint("sharh linking: roadmap")),
+    ]
+    .spacing(2)
+    .padding(2);
+    let row_two = row![
+        tool_btn("import", Message::ImportBok),
+        tool_btn("ctr", Message::Hint("control room: roadmap")),
+        tool_btn("authors", Message::PanelSelected(Panel::Authors)),
+        tool_btn("copy", Message::Hint("copy page: roadmap")),
+        tool_btn("bkmrk", Message::PanelSelected(Panel::Bookmarks)),
+        tool_btn("export", Message::ExportBook),
+        tool_btn("betaka", Message::OpenCard),
+        tool_btn("upgrade", Message::PanelSelected(Panel::Downloads)),
+        tool_btn("options", Message::About),
+        tool_btn("stop", Message::Hint("no background task")),
+        tool_btn("globe", Message::PanelSelected(Panel::Downloads)),
+        tool_btn(theme_icon, Message::ThemeToggle),
+        tool_btn("help", Message::About),
+        tool_btn("plus", Message::OpenDatabase),
+        button(ar("A+", 14.0)).on_press(Message::FontBigger),
+        button(ar("A-", 14.0)).on_press(Message::FontSmaller),
+    ]
+    .spacing(2)
+    .padding(2);
+    column![row_one, row_two].into()
 }
 
 fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message> {
@@ -1026,9 +1206,9 @@ fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
         None => String::from("no pages"),
     };
     let nav = row![
-        button(ar("التالي", 14.0)).on_press(Message::ReaderNext),
+        button(ticon("next", 18.0)).on_press(Message::ReaderNext),
         text(label).font(AMIRI).size(16.0),
-        button(ar("السابق", 14.0)).on_press(Message::ReaderPrev),
+        button(ticon("prev", 18.0)).on_press(Message::ReaderPrev),
     ]
     .spacing(8);
     let page_view = column![
@@ -1085,15 +1265,15 @@ fn reader(state: &State) -> Element<'_, Message> {
         .tabs
         .iter()
         .enumerate()
-        .map(|(index, tab)| {
-            let label = if Some(index) == state.active_tab {
-                format!("> {}", tab.title)
-            } else {
-                tab.title.clone()
-            };
-            button(ar(label.as_str(), 14.0))
-                .on_press(Message::TabSelected(index))
-                .into()
+        .map(|(index, _)| {
+            let label = format!("#{num}", num = index + 1);
+            row![
+                button(ticon("display", 14.0)).on_press(Message::TabSelected(index)),
+                button(ar(label.as_str(), 13.0)).on_press(Message::TabSelected(index)),
+                button(ticon("x", 14.0)).on_press(Message::TabClosed(index)),
+            ]
+            .spacing(2)
+            .into()
         })
         .collect();
     let tab_bar = row(tabs).spacing(4);
@@ -1102,9 +1282,8 @@ fn reader(state: &State) -> Element<'_, Message> {
             Some(tab) => match &tab.kind {
                 TabKind::Card(body) => column![
                     row![
-                        button(ar("مفضلة", 14.0)).on_press(Message::BookmarkAdd),
-                        button(ar("إغلاق", 14.0))
-                            .on_press(Message::TabClosed(state.active_tab.unwrap_or(0))),
+                        tool_btn("bkmrk", Message::BookmarkAdd),
+                        tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
                     ]
                     .spacing(8),
                     scrollable(
@@ -1120,9 +1299,8 @@ fn reader(state: &State) -> Element<'_, Message> {
                 .into(),
                 TabKind::Reader(reader_tab) => column![
                     row![
-                        button(ar("مفضلة", 14.0)).on_press(Message::BookmarkAdd),
-                        button(ar("إغلاق", 14.0))
-                            .on_press(Message::TabClosed(state.active_tab.unwrap_or(0))),
+                        tool_btn("bkmrk", Message::BookmarkAdd),
+                        tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
                     ]
                     .spacing(8),
                     reader_tab_view(reader_tab, state.font_size),
@@ -1149,16 +1327,14 @@ fn welcome() -> Element<'static, Message> {
     let downloads = button(ar("تحميل من archive.org", 18.0))
         .on_press(Message::PanelSelected(Panel::Downloads))
         .width(Length::Fixed(300.0));
-    let body = column![
-        ar("شاملة كرافت", 44.0),
-        ar("قارئ مكتبة عربي خفيف", 18.0),
-        ar(WELCOME_TEXT, 15.0),
-        open,
-        import,
-        downloads,
-    ]
-    .spacing(12)
-    .width(Length::Shrink);
+    let logo = Svg::new(Handle::from_memory(
+        &include_bytes!("../assets/icons/display.svg")[..],
+    ))
+    .width(Length::Fixed(110.0))
+    .height(Length::Fixed(110.0));
+    let body = column![logo, ar(WELCOME_TEXT, 15.0), open, import, downloads,]
+        .spacing(12)
+        .width(Length::Shrink);
     row![
         Space::with_width(Length::Fill),
         container(body).padding(24),
@@ -1178,7 +1354,7 @@ fn status_bar(state: &State) -> Element<'_, Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let top = column![menu_bar(), tool_bar(state)];
+    let top = tool_bar(state);
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
         welcome()
     } else {
