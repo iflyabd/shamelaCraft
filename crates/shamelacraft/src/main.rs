@@ -362,10 +362,7 @@ fn import_bok(state: &mut State) {
         return;
     }
     let pages = match BookDb::open(&out) {
-        Ok(db) => (
-            db.pages().unwrap_or_default(),
-            db.toc().unwrap_or_default(),
-        ),
+        Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
         Err(err) => {
             state.status = format!("تعذر فتح المحوَّل: {err}");
             return;
@@ -688,11 +685,10 @@ fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
         .map(|(depth, node)| {
             let label = format!("{}{}", "  ".repeat(depth), node.content);
             let widget = text(label).font(AMIRI).size((font_size - 4.0).max(12.0));
-            let target = node.page.as_deref().and_then(|raw| {
-                tab.pages
-                    .iter()
-                    .position(|page| page.id.to_string() == raw)
-            });
+            let target = node
+                .page
+                .as_deref()
+                .and_then(|raw| tab.pages.iter().position(|page| page.id.to_string() == raw));
             match target {
                 Some(index) => button(widget)
                     .on_press(Message::TocJump(index))
@@ -733,12 +729,9 @@ fn reader(state: &State) -> Element<'_, Message> {
             Some(tab) => match &tab.kind {
                 TabKind::Card(body) => column![
                     row![
-                        button(text("إضافة للمفضلة").font(AMIRI))
-                            .on_press(Message::BookmarkAdd),
+                        button(text("إضافة للمفضلة").font(AMIRI)).on_press(Message::BookmarkAdd),
                         button(text("إغلاق التبويب").font(AMIRI))
-                            .on_press(Message::TabClosed(
-                                state.active_tab.unwrap_or(0)
-                            )),
+                            .on_press(Message::TabClosed(state.active_tab.unwrap_or(0))),
                     ]
                     .spacing(8),
                     scrollable(
@@ -753,12 +746,9 @@ fn reader(state: &State) -> Element<'_, Message> {
                 .into(),
                 TabKind::Reader(reader_tab) => column![
                     row![
-                        button(text("إضافة للمفضلة").font(AMIRI))
-                            .on_press(Message::BookmarkAdd),
+                        button(text("إضافة للمفضلة").font(AMIRI)).on_press(Message::BookmarkAdd),
                         button(text("إغلاق التبويب").font(AMIRI))
-                            .on_press(Message::TabClosed(
-                                state.active_tab.unwrap_or(0)
-                            )),
+                            .on_press(Message::TabClosed(state.active_tab.unwrap_or(0))),
                     ]
                     .spacing(8),
                     reader_tab_view(reader_tab, state.font_size),

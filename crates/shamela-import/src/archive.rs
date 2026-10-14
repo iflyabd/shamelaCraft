@@ -22,8 +22,8 @@ pub struct ArchiveFile {
 
 /// Parse an archive.org metadata document into its file list.
 pub fn parse_item_files(document: &str) -> Result<Vec<ArchiveFile>> {
-    let value: serde_json::Value =
-        serde_json::from_str(document).map_err(|err| crate::err(format!("metadata JSON: {err}")))?;
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|err| crate::err(format!("metadata JSON: {err}")))?;
     let files = value
         .get("files")
         .and_then(|node| node.as_array())

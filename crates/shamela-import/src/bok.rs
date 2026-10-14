@@ -124,9 +124,9 @@ fn read_table(reader: &mut PageReader, name: &str) -> Result<Table> {
     let entry = catalog
         .iter()
         .find(|item| item.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| err(format!("table '{name}' not found"))?;
-    let def =
-        read_table_def(reader, &entry.name, entry.table_page).map_err(|err| err(format!("{err}")))?;
+        .ok_or_else(|| err(format!("table '{name}' not found")))?;
+    let def = read_table_def(reader, &entry.name, entry.table_page)
+        .map_err(|err| err(format!("{err}")))?;
     let columns = def
         .columns
         .iter()
@@ -166,7 +166,10 @@ pub fn open_bok(path: &Path) -> Result<BokBook> {
         PageReader::open(path_str).map_err(|err| crate::err(format!("open .bok: {err}")))?;
 
     let main = read_table(&mut reader, "main")?;
-    let row = main.rows.first().ok_or_else(|| err("main table is empty"))?;
+    let row = main
+        .rows
+        .first()
+        .ok_or_else(|| err("main table is empty"))?;
     let id = int_of(&main, row, "BkId").ok_or_else(|| err("main.BkId missing"))?;
 
     let meta = BokMeta {

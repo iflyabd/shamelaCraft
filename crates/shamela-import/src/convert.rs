@@ -33,7 +33,10 @@ pub fn bok_to_book_db(book: &BokBook, out: &Path) -> rusqlite::Result<()> {
     let mut stack: Vec<(i64, i64)> = Vec::new(); // (level, title id)
     for (index, heading) in book.toc.iter().enumerate() {
         let id = index as i64 + 1;
-        while stack.last().is_some_and(|(level, _)| *level >= heading.level) {
+        while stack
+            .last()
+            .is_some_and(|(level, _)| *level >= heading.level)
+        {
             stack.pop();
         }
         let parent = stack.last().map(|(_, parent_id)| parent_id.to_string());
