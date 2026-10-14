@@ -114,6 +114,9 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Ar, "note_hint") => "اكتب تعليقا ...",
         (Lang::En, "note_hint") => "write a note ...",
         (Lang::Fr, "note_hint") => "écrire une note ...",
+        (Lang::Ar, "control_room") => "غرفة التحكم",
+        (Lang::En, "control_room") => "Control room",
+        (Lang::Fr, "control_room") => "Salle de contrôle",
         _ => "?",
     }
 }

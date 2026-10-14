@@ -9,6 +9,7 @@
 //! legacy `.bok` files, and archive.org collections. Full-text content
 //! providers beyond `.bok`/API databases are on the roadmap.
 
+use iced::widget::pane_grid::{self, Axis};
 use iced::widget::svg::{Handle, Svg};
 use iced::widget::text::Shaping;
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
@@ -62,12 +63,21 @@ fn about_text(lang: Lang) -> &'static str {
     }
 }
 
+/// The three resizable panes: reader | books | side navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneKind {
+    Reader,
+    Books,
+    Side,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Panel {
     #[default]
     Library,
     Authors,
     Quran,
+    Control,
     Bookmarks,
     Downloads,
 }
@@ -156,6 +166,12 @@ enum Message {
     NoteDelete(i64),
     CopyPage,
     LastSearch,
+    PaneResized(pane_grid::ResizeEvent),
+    ToggleToc,
+    ToggleNotes,
+    OpenImported(String),
+    FindPage,
+    DeleteBook(String),
     Hint(&'static str),
 }
 
@@ -182,6 +198,10 @@ struct State {
     quran_results: Vec<shamela_content::quran::Verse>,
     note_input: String,
     notes: Vec<shamela_content::notes::Note>,
+    panes: pane_grid::State<PaneKind>,
+    show_toc: bool,
+    show_notes: bool,
+    control_files: Vec<(String, u64)>,
     target_lang: String,
     dl_id: String,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
@@ -216,6 +236,10 @@ impl Default for State {
             quran_results: Vec::new(),
             note_input: String::new(),
             notes: Vec::new(),
+            panes: init_panes(),
+            show_toc: true,
+            show_notes: true,
+            control_files: Vec::new(),
             target_lang: String::from("en"),
             dl_id: String::from("shamela-16241"),
             dl_files: Vec::new(),
@@ -308,6 +332,18 @@ fn list_row(label: String, selected: bool, msg: Message, size: f32) -> Element<'
 /// Icon toolbar button.
 fn tool_btn(icon: &'static str, msg: Message) -> Element<'static, Message> {
     button(ticon(icon, 22.0)).on_press(msg).padding(5).into()
+}
+
+/// Reader | books | side navigation, user-resizable via drag handles.
+fn init_panes() -> pane_grid::State<PaneKind> {
+    let (mut panes, reader) = pane_grid::State::new(PaneKind::Reader);
+    if let Some((books, first)) = panes.split(Axis::Vertical, reader, PaneKind::Books) {
+        if let Some((_, second)) = panes.split(Axis::Vertical, books, PaneKind::Side) {
+            panes.resize(first, 0.58);
+            panes.resize(second, 0.42);
+        }
+    }
+    panes
 }
 
 fn data_dir() -> PathBuf {
@@ -1134,6 +1170,31 @@ fn run_quran_search(state: &mut State) {
     }
 }
 
+/// Re-list imported `*.db` books with sizes for the control room.
+fn refresh_control(state: &mut State) {
+    state.control_files.clear();
+    let dir = books_dir();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(String, u64)> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("db"))
+        })
+        .filter_map(|path| {
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| (name.to_string(), size))
+        })
+        .collect();
+    files.sort();
+    state.control_files = files;
+}
+
 fn refresh_notes(state: &mut State) {
     state.notes.clear();
     state.note_input.clear();
@@ -1178,7 +1239,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(lib) = state.lib.as_ref() {
                 if let Ok(Some(full)) = lib.author(id) {
                     load_author_books(state, &full);
-                    state.panel = Panel::Library;
                 }
             }
         }
@@ -1193,6 +1253,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 if let Some(lib) = state.lib.as_ref() {
                     state.authors = lib.search_authors("", 200).unwrap_or_default();
                 }
+            }
+            if panel == Panel::Control {
+                refresh_control(state);
             }
         }
         Message::BookmarkAdd => add_bookmark(state),
@@ -1245,6 +1308,57 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let body = content_to_text(&page.content);
             let cited = format!("{}\n[{}]", body, tab.title);
             return clipboard::write(cited);
+        }
+        Message::PaneResized(event) => {
+            state.panes.resize(event.split, event.ratio);
+        }
+        Message::ToggleToc => {
+            state.show_toc = !state.show_toc;
+        }
+        Message::ToggleNotes => {
+            state.show_notes = !state.show_notes;
+        }
+        Message::OpenImported(name) => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let path = books_dir().join(&name);
+            let title = path
+                .file_stem()
+                .and_then(|part| part.to_str())
+                .unwrap_or("book")
+                .to_string();
+            let mut hasher = DefaultHasher::new();
+            name.hash(&mut hasher);
+            let book_id = hasher.finish() as i64;
+            open_imported_db(state, &path, title, book_id);
+        }
+        Message::FindPage => {
+            let query = state.query.trim().to_string();
+            if query.chars().count() < MIN_QUERY_CHARS {
+                state.status = String::from("type 2+ chars in the search box first");
+                return Task::none();
+            }
+            let count = match state.active_tab.and_then(|i| state.tabs.get(i)) {
+                Some(tab) => match &tab.kind {
+                    TabKind::Reader(reader) => match reader.pages.get(reader.index) {
+                        Some(page) => {
+                            let opts = NormalizeOptions::default();
+                            let needle = shamela_index::normalize_arabic(&query, &opts);
+                            let hay = shamela_index::normalize_arabic(&page.content, &opts);
+                            hay.matches(&needle).count()
+                        }
+                        None => 0,
+                    },
+                    _ => 0,
+                },
+                None => 0,
+            };
+            state.status = format!("{count} matches on this page");
+        }
+        Message::DeleteBook(name) => {
+            let path = books_dir().join(&name);
+            let _ = std::fs::remove_file(&path);
+            refresh_control(state);
         }
         Message::LastSearch => {
             if state.last_query.trim().chars().count() >= MIN_QUERY_CHARS {
@@ -1328,9 +1442,9 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
     let row_one = row![
         tool_btn("selbk", Message::PanelSelected(Panel::Library)),
         tool_btn("display", Message::FocusBook),
-        tool_btn("tree", Message::PanelSelected(Panel::Library)),
-        tool_btn("com", Message::Hint("comments: roadmap")),
-        tool_btn("searchpage", Message::SearchBook),
+        tool_btn("tree", Message::ToggleToc),
+        tool_btn("com", Message::ToggleNotes),
+        tool_btn("searchpage", Message::FindPage),
         tool_btn("searchbok", Message::SearchBook),
         tool_btn("search", Message::PanelSelected(Panel::Library)),
         tool_btn("lastsearch", Message::LastSearch),
@@ -1346,7 +1460,7 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
     .padding(2);
     let row_two = row![
         tool_btn("import", Message::ImportBok),
-        tool_btn("ctr", Message::Hint("control room: roadmap")),
+        tool_btn("ctr", Message::PanelSelected(Panel::Control)),
         tool_btn("authors", Message::PanelSelected(Panel::Authors)),
         tool_btn("copy", Message::CopyPage),
         tool_btn("bkmrk", Message::PanelSelected(Panel::Bookmarks)),
@@ -1397,21 +1511,6 @@ fn library_tree(state: &State) -> Element<'_, Message> {
             category.name.clone(),
             Some(category.id) == state.active_category,
             Message::CategorySelected(category.id),
-            item_size(state.font_size),
-        ));
-    }
-    items.push(ar(tr(state.lang, "books"), title_size(state.font_size)));
-    if state.active_category.is_none() && state.active_author.is_none() {
-        items.push(ar(
-            tr(state.lang, "pick_section"),
-            item_size(state.font_size),
-        ));
-    }
-    for book in state.books.iter().take(200) {
-        items.push(list_row(
-            book.name.clone(),
-            false,
-            Message::BookOpened(book.id),
             item_size(state.font_size),
         ));
     }
@@ -1569,6 +1668,64 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     .into()
 }
 
+/// Middle sub side panel: books of the active category, author, or
+/// search — the detail to the navigation tree, like the original.
+fn books_panel(state: &State) -> Element<'_, Message> {
+    let mut items: Vec<Element<'_, Message>> =
+        vec![ar(tr(state.lang, "books"), title_size(state.font_size))];
+    if state.books.is_empty() {
+        let hint = if state.query.trim().chars().count() >= MIN_QUERY_CHARS {
+            tr(state.lang, "no_results")
+        } else {
+            tr(state.lang, "pick_section")
+        };
+        items.push(ar(hint, item_size(state.font_size)));
+    }
+    for book in state.books.iter().take(200) {
+        items.push(list_row(
+            book.name.clone(),
+            false,
+            Message::BookOpened(book.id),
+            item_size(state.font_size),
+        ));
+    }
+    scrollable(column(items).spacing(4))
+        .height(Length::Fill)
+        .into()
+}
+
+/// Control room: imported book files with sizes and deletion.
+fn control_panel(state: &State) -> Element<'_, Message> {
+    let total: u64 = state.control_files.iter().map(|(_, size)| size).sum();
+    let megabytes = total as f64 / 1_048_576.0;
+    let mut items: Vec<Element<'_, Message>> = vec![
+        ar(tr(state.lang, "control_room"), title_size(state.font_size)),
+        ar(
+            format!("{megabytes:.1} MB : {n}", n = state.control_files.len()),
+            item_size(state.font_size),
+        ),
+    ];
+    for (name, size) in &state.control_files {
+        let megabytes = *size as f64 / 1_048_576.0;
+        items.push(
+            row![
+                list_row(
+                    format!("{name} ({megabytes:.1} MB)"),
+                    false,
+                    Message::OpenImported(name.clone()),
+                    item_size(state.font_size),
+                ),
+                button(ticon("x", 16.0)).on_press(Message::DeleteBook(name.clone())),
+            ]
+            .spacing(4)
+            .into(),
+        );
+    }
+    scrollable(column(items).spacing(4))
+        .height(Length::Fill)
+        .into()
+}
+
 fn sidebar(state: &State) -> Element<'_, Message> {
     let show_search = matches!(state.panel, Panel::Library | Panel::Authors);
     let search: Element<'_, Message> = if show_search {
@@ -1588,6 +1745,7 @@ fn sidebar(state: &State) -> Element<'_, Message> {
                 Panel::Authors => authors_panel(state),
                 Panel::Bookmarks => bookmark_list(state),
                 Panel::Quran => quran_panel(state),
+                Panel::Control => control_panel(state),
                 Panel::Downloads => downloads_panel(state),
             }
         };
@@ -1647,20 +1805,28 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         .spacing(4)
         .into(),
     );
-    let page_view = column![
-        nav,
-        scrollable(
-            text(shown)
-                .font(AMIRI)
-                .size(font_size)
-                .shaping(Shaping::Advanced)
-                .width(Length::Fill),
-        )
-        .height(Length::FillPortion(3)),
-        scrollable(column(note_items).spacing(2)).height(Length::FillPortion(1)),
-    ]
-    .spacing(8)
-    .width(Length::FillPortion(2));
+    let page_scroll: Element<'_, Message> = scrollable(
+        text(shown)
+            .font(AMIRI)
+            .size(font_size)
+            .shaping(Shaping::Advanced)
+            .width(Length::Fill),
+    )
+    .height(if state.show_notes {
+        Length::FillPortion(3)
+    } else {
+        Length::Fill
+    })
+    .into();
+    let mut page_parts: Vec<Element<'_, Message>> = vec![nav.into(), page_scroll];
+    if state.show_notes {
+        page_parts.push(
+            scrollable(column(note_items).spacing(2))
+                .height(Length::FillPortion(1))
+                .into(),
+        );
+    }
+    let page_view = column(page_parts).spacing(8).width(Length::Fill);
 
     fn flatten<'a>(nodes: &'a [TocNode], depth: usize, out: &mut Vec<(usize, &'a TocNode)>) {
         for node in nodes {
@@ -1695,9 +1861,10 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
             }
         })
         .collect();
-    let toc_view = scrollable(column(entries).spacing(2))
-        .height(Length::Fill)
-        .width(Length::FillPortion(1));
+    if !state.show_toc {
+        return column![page_view].height(Length::Fill).into();
+    }
+    let toc_view = scrollable(column(entries).spacing(2)).height(Length::Fill);
     row![page_view, toc_view]
         .spacing(8)
         .height(Length::Fill)
@@ -1808,11 +1975,17 @@ fn view(state: &State) -> Element<'_, Message> {
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
         welcome(state)
     } else {
-        row![reader(state), sidebar(state)]
-            .spacing(8)
-            .padding(8)
-            .height(Length::Fill)
-            .into()
+        pane_grid::PaneGrid::new(&state.panes, |_pane, content, _| {
+            pane_grid::Content::new(match content {
+                PaneKind::Reader => reader(state),
+                PaneKind::Books => books_panel(state),
+                PaneKind::Side => sidebar(state),
+            })
+        })
+        .spacing(6)
+        .height(Length::Fill)
+        .on_resize(10.0, Message::PaneResized)
+        .into()
     };
     column![top, body, status_bar(state)].into()
 }
