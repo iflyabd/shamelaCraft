@@ -23,15 +23,6 @@ impl Lang {
         }
     }
 
-    /// Target language code for page translation (MyMemory pairs).
-    pub fn mt_code(self) -> &'static str {
-        match self {
-            Self::Ar => "ar",
-            Self::En => "en",
-            Self::Fr => "fr",
-        }
-    }
-
     pub fn next(self) -> Self {
         match self {
             Self::Ar => Self::En,
