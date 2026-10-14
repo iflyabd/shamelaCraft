@@ -136,7 +136,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         let bookmarks = read_bookmarks();
-        Self {
+        let mut state = Self {
             lib: None,
             index: None,
             categories: Vec::new(),
@@ -156,7 +156,14 @@ impl Default for State {
             font_size: 20.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
+        };
+        if let Ok(saved) = std::fs::read_to_string(last_db_path()) {
+            let path = PathBuf::from(saved.trim());
+            if path.is_file() {
+                open_database_path(&mut state, Some(path));
+            }
         }
+        state
     }
 }
 
@@ -179,6 +186,72 @@ fn data_dir() -> PathBuf {
     let dir = std::path::Path::new(&home).join(".shamelacraft");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+fn last_db_path() -> PathBuf {
+    data_dir().join("lastdb.txt")
+}
+
+fn remember_db(path: &std::path::Path) {
+    let _ = std::fs::write(last_db_path(), path.to_string_lossy().as_bytes());
+}
+
+/// Headless end-to-end check used for smoke-testing builds:
+/// opens a master.db (counts + full index), imports a .bok, prints results.
+fn self_test(master: &str, bok: &str) -> i32 {
+    let mut failures = 0;
+    match Library::open(std::path::Path::new(master)) {
+        Ok(lib) => match lib.counts() {
+            Ok(counts) => {
+                println!(
+                    "MASTER OK books={} authors={} categories={}",
+                    counts.books, counts.authors, counts.categories
+                );
+                match build_index(&lib) {
+                    Ok(index) => {
+                        let opts = NormalizeOptions::default();
+                        match index.search("test", &opts, 5) {
+                            Ok(hits) => println!("INDEX OK hits={}", hits.len()),
+                            Err(err) => {
+                                println!("INDEX SEARCH FAIL: {err}");
+                                failures += 1;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        println!("INDEX BUILD FAIL: {err}");
+                        failures += 1;
+                    }
+                }
+            }
+            Err(err) => {
+                println!("COUNTS FAIL: {err}");
+                failures += 1;
+            }
+        },
+        Err(err) => {
+            println!("OPEN FAIL: {err}");
+            failures += 1;
+        }
+    }
+    match shamela_import::bok::open_bok(std::path::Path::new(bok)) {
+        Ok(book) => println!(
+            "BOK OK title={} pages={} toc={}",
+            book.meta.title,
+            book.pages.len(),
+            book.toc.len()
+        ),
+        Err(err) => {
+            println!("BOK FAIL: {err}");
+            failures += 1;
+        }
+    }
+    if failures == 0 {
+        println!("SELFTEST PASS");
+    } else {
+        println!("SELFTEST FAIL({failures})");
+    }
+    failures
 }
 
 fn bookmarks_path() -> PathBuf {
@@ -235,12 +308,24 @@ fn build_index(lib: &Library) -> Result<BookIndex, String> {
 }
 
 fn open_database(state: &mut State) {
-    let dialog = rfd::FileDialog::new()
-        .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
-        .set_title("master.db");
-    let Some(path) = dialog.pick_file() else {
-        state.status = String::from("no file selected");
-        return;
+    open_database_path(state, None);
+}
+
+/// Open a master.db; with `Some(path)` it skips the file picker (used for
+/// the remembered database and by tests).
+fn open_database_path(state: &mut State, preset: Option<PathBuf>) {
+    let path = match preset {
+        Some(path) => path,
+        None => {
+            let dialog = rfd::FileDialog::new()
+                .add_filter("SQLite", &["db", "sqlite", "sqlite3"])
+                .set_title("master.db");
+            let Some(picked) = dialog.pick_file() else {
+                state.status = String::from("no file selected");
+                return;
+            };
+            picked
+        }
     };
     match Library::open(&path) {
         Ok(lib) => {
@@ -251,6 +336,7 @@ fn open_database(state: &mut State) {
                 .to_string();
             match (lib.counts(), build_index(&lib)) {
                 (Ok(counts), Ok(index)) => {
+                    remember_db(&path);
                     state.lib = Some(lib);
                     state.index = Some(index);
                     state.categories = state
@@ -1053,17 +1139,6 @@ fn reader(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn debug_matrix() -> Element<'static, Message> {
-    column![
-        ar("DBG bare14", 14.0),
-        ar("DBG bare18", 18.0),
-        button(ar("DBG btn14", 14.0)),
-        button(ar("DBG btn18", 18.0)),
-    ]
-    .spacing(4)
-    .into()
-}
-
 fn welcome() -> Element<'static, Message> {
     let open = button(ar("فتح قاعدة البيانات", 18.0))
         .on_press(Message::OpenDatabase)
@@ -1075,7 +1150,6 @@ fn welcome() -> Element<'static, Message> {
         .on_press(Message::PanelSelected(Panel::Downloads))
         .width(Length::Fixed(300.0));
     let body = column![
-        debug_matrix(),
         ar("شاملة كرافت", 44.0),
         ar("قارئ مكتبة عربي خفيف", 18.0),
         ar(WELCOME_TEXT, 15.0),
@@ -1125,6 +1199,10 @@ fn theme(state: &State) -> Theme {
 }
 
 fn main() -> iced::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "--self-test" {
+        std::process::exit(self_test(&args[2], &args[3]));
+    }
     iced::application("ShamelaCraft", update, view)
         .theme(theme)
         .font(include_bytes!("../assets/fonts/Amiri-Regular.ttf"))
