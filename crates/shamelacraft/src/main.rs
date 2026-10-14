@@ -160,22 +160,13 @@ impl Default for State {
     }
 }
 
-/// Arabic text with proper complex shaping. Use for EVERY Arabic string.
-fn ar(content: &str, size: f32) -> Element<'_, Message> {
-    text(content)
+/// Arabic text with proper complex shaping. Takes anything string-like and
+/// returns an owned element, so callers may pass temporary labels freely.
+fn ar(content: impl Into<String>, size: f32) -> Element<'static, Message> {
+    text(content.into())
         .font(AMIRI)
         .size(size)
         .shaping(Shaping::Advanced)
-        .into()
-}
-
-/// Arabic text that fills its container width.
-fn ar_fill(content: &str, size: f32) -> Element<'_, Message> {
-    text(content)
-        .font(AMIRI)
-        .size(size)
-        .shaping(Shaping::Advanced)
-        .width(Length::Fill)
         .into()
 }
 
@@ -740,7 +731,7 @@ fn item_size(base: f32) -> f32 {
     (base - 4.0).max(12.0)
 }
 
-fn menu_bar(state: &State) -> Element<'_, Message> {
+fn menu_bar() -> Element<'static, Message> {
     let file = button(ar("ملف", 14.0)).on_press(Message::OpenDatabase);
     let search = button(ar("بحث", 14.0)).on_press(Message::PanelSelected(Panel::Library));
     let screens = button(ar("شاشات", 14.0)).on_press(Message::PanelSelected(Panel::Library));
@@ -1101,7 +1092,7 @@ fn status_bar(state: &State) -> Element<'_, Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let top = column![menu_bar(state), tool_bar(state)];
+    let top = column![menu_bar(), tool_bar(state)];
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
         welcome(state)
     } else {
