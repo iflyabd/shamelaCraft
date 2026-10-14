@@ -1053,6 +1053,17 @@ fn reader(state: &State) -> Element<'_, Message> {
         .into()
 }
 
+fn debug_matrix() -> Element<'static, Message> {
+    column![
+        ar("DBG bare14", 14.0),
+        ar("DBG bare18", 18.0),
+        button(ar("DBG btn14", 14.0)),
+        button(ar("DBG btn18", 18.0)),
+    ]
+    .spacing(4)
+    .into()
+}
+
 fn welcome() -> Element<'static, Message> {
     let open = button(ar("فتح قاعدة البيانات", 18.0))
         .on_press(Message::OpenDatabase)
@@ -1064,6 +1075,7 @@ fn welcome() -> Element<'static, Message> {
         .on_press(Message::PanelSelected(Panel::Downloads))
         .width(Length::Fixed(300.0));
     let body = column![
+        debug_matrix(),
         ar("شاملة كرافت", 44.0),
         ar("قارئ مكتبة عربي خفيف", 18.0),
         ar(WELCOME_TEXT, 15.0),
