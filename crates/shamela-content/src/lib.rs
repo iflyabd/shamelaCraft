@@ -20,6 +20,7 @@
 //! re-implemented here in Rust; book texts themselves are never bundled.
 
 pub mod book;
+pub mod cache;
 pub mod decoder;
 pub mod html;
 pub mod roots;

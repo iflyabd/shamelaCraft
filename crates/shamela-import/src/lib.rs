@@ -16,6 +16,7 @@ pub mod archive;
 pub mod bok;
 pub mod convert;
 pub mod extract;
+pub mod translate;
 
 use std::fmt::{Display, Formatter};
 

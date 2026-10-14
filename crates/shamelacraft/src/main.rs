@@ -16,6 +16,8 @@ use iced::{Element, Font, Length, Task, Theme};
 use shamela_content::book::{BookDb, TocNode};
 use shamela_content::html::content_to_text;
 use shamela_db::{Author, Book, Library};
+mod i18n;
+use i18n::{tr, Lang};
 use shamela_index::{BookIndex, NormalizeOptions};
 use std::path::PathBuf;
 
@@ -25,17 +27,40 @@ const SEARCH_LIMIT: i64 = 100;
 const MIN_QUERY_CHARS: usize = 2;
 const SIDEBAR_WIDTH: f32 = 320.0;
 
-const ABOUT_TEXT: &str = "v0.1 ShamelaCraft - lightweight Arabic library reader\n\n\
+fn about_text(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Ar => {
+            "v0.1 ShamelaCraft - lightweight Arabic library reader\n\n\
     - master.db read-only catalog (categories, books, authors)\n\
     - legacy BOK import, pure-Rust Jet reader\n\
     - archive.org keyless downloads (bok, zip, tar, rar)\n\
     - tolerant Arabic search (tashkeel, hamza, tatweel)\n\
     - tabs, bookmarks, themes, export to markdown\n\n\
     - idea: Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
-    - clean-room Rust, no proprietary code or assets";
-
-const WELCOME_TEXT: &str =
-    "اختر مصدرا للبدء: افتح master.db من نسختك، أو استورد كتاب BOK، أو حمّل من archive.org.";
+    - clean-room Rust, no proprietary code or assets"
+        }
+        Lang::En => {
+            "v0.1 ShamelaCraft - lightweight Arabic library reader\n\n\
+    - master.db read-only catalog (categories, books, authors)\n\
+    - legacy BOK import, pure-Rust Jet reader\n\
+    - archive.org keyless downloads (bok, zip, tar, rar)\n\
+    - tolerant Arabic search (tashkeel, hamza, tatweel)\n\
+    - tabs, bookmarks, themes, export to markdown\n\n\
+    - idea: Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
+    - clean-room Rust, no proprietary code or assets"
+        }
+        Lang::Fr => {
+            "v0.1 ShamelaCraft - lecteur arabe leger de bibliotheque\n\n\
+    - catalogue master.db en lecture seule\n\
+    - import BOK patrimonial, lecteur Jet 100% Rust\n\
+    - telechargements archive.org sans cle\n\
+    - recherche arabe tolerante\n\
+    - onglets, favoris, themes, export markdown\n\n\
+    - idee : Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
+    - Rust salle blanche, sans code proprietaire"
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Panel {
@@ -67,6 +92,8 @@ struct ReaderTab {
     index: usize,
     toc: Vec<TocNode>,
     rendered: String,
+    translation: Option<String>,
+    show_translation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +137,7 @@ enum Message {
     DownloadFile(String),
     FontBigger,
     FontSmaller,
+    LangCycle,
     ThemeToggle,
     FocusBook,
     SearchBook,
@@ -117,6 +145,8 @@ enum Message {
     OpenCard,
     PageFirst,
     PageLast,
+    TranslatePage,
+    CycleTarget,
     Hint(&'static str),
 }
 
@@ -136,6 +166,8 @@ struct State {
     active_tab: Option<usize>,
     bookmarks: Vec<Bookmark>,
     panel: Panel,
+    lang: Lang,
+    target_lang: String,
     dl_id: String,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
     font_size: f32,
@@ -162,6 +194,8 @@ impl Default for State {
             active_tab: None,
             bookmarks,
             panel: Panel::Library,
+            lang: Lang::Ar,
+            target_lang: String::from("en"),
             dl_id: String::from("shamela-16241"),
             dl_files: Vec::new(),
             font_size: 20.0,
@@ -224,6 +258,7 @@ fn ticon(name: &'static str, px: f32) -> Element<'static, Message> {
         "moon" => Handle::from_memory(&include_bytes!("../assets/icons/moon.svg")[..]),
         "x" => Handle::from_memory(&include_bytes!("../assets/icons/x.svg")[..]),
         "globe" => Handle::from_memory(&include_bytes!("../assets/icons/globe.svg")[..]),
+        "lang" => Handle::from_memory(&include_bytes!("../assets/icons/lang.svg")[..]),
         "help" => Handle::from_memory(&include_bytes!("../assets/icons/help.svg")[..]),
         "plus" => Handle::from_memory(&include_bytes!("../assets/icons/plus.svg")[..]),
         _ => Handle::from_memory(&include_bytes!("../assets/icons/help.svg")[..]),
@@ -516,7 +551,7 @@ fn open_about(state: &mut State) {
     state.tabs.push(Tab {
         book_id: -1,
         title: String::from("about"),
-        kind: TabKind::Card(ABOUT_TEXT.to_string()),
+        kind: TabKind::Card(about_text(state.lang).to_string()),
     });
     state.active_tab = Some(state.tabs.len() - 1);
 }
@@ -610,6 +645,8 @@ fn open_imported_pages(
             index: 0,
             toc,
             rendered,
+            translation: None,
+            show_translation: false,
         }),
     });
     state.active_tab = Some(state.tabs.len() - 1);
@@ -816,6 +853,69 @@ fn open_card(state: &mut State) {
     open_tab(state, book_id);
 }
 
+fn translations_db() -> PathBuf {
+    data_dir().join("translations.db")
+}
+
+/// Translate the active page (chunked, cached) or toggle back to original.
+fn translate_current(state: &mut State) {
+    let target = state.target_lang.clone();
+    let from = "ar";
+    if target == from {
+        state.status = String::from("target is same as source");
+        return;
+    }
+    let Some(index) = state.active_tab else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    let cache = match shamela_content::cache::TranslationCache::open(&translations_db()) {
+        Ok(cache) => cache,
+        Err(err) => {
+            state.status = format!("cache failed: {err}");
+            return;
+        }
+    };
+    let Some(tab) = state.tabs.get_mut(index) else {
+        return;
+    };
+    let TabKind::Reader(reader) = &mut tab.kind else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    if reader.pages.is_empty() {
+        return;
+    }
+    if reader.show_translation {
+        reader.show_translation = false;
+        return;
+    }
+    let Some(page) = reader.pages.get(reader.index) else {
+        return;
+    };
+    let source = content_to_text(&page.content);
+    state.status = format!("translating to {target} ...");
+    let mut fetch = |chunk: &str| -> shamela_import::Result<String> {
+        let key = shamela_content::cache::cache_key(chunk, from, &target);
+        if let Ok(Some(hit)) = cache.get(&key) {
+            return Ok(hit);
+        }
+        let got = shamela_import::translate::translate_chunk(chunk, from, &target)?;
+        let _ = cache.put(&key, &target, &got);
+        Ok(got)
+    };
+    match shamela_import::translate::translate_page(&mut fetch, &source, from, &target) {
+        Ok(text) => {
+            reader.translation = Some(text);
+            reader.show_translation = true;
+            state.status = format!("translated to {target}");
+        }
+        Err(err) => {
+            state.status = format!("translate failed: {err}");
+        }
+    }
+}
+
 fn move_page(state: &mut State, delta: isize) {
     let Some(index) = state.active_tab else {
         return;
@@ -831,6 +931,8 @@ fn move_page(state: &mut State, delta: isize) {
     }
     let last = reader.pages.len() as isize - 1;
     reader.index = (reader.index as isize + delta).clamp(0, last) as usize;
+    reader.translation = None;
+    reader.show_translation = false;
     reader.rendered = reader
         .pages
         .get(reader.index)
@@ -850,6 +952,8 @@ fn jump_to_page(state: &mut State, target: usize) {
     };
     if target < reader.pages.len() {
         reader.index = target;
+        reader.translation = None;
+        reader.show_translation = false;
         reader.rendered = reader
             .pages
             .get(target)
@@ -958,6 +1062,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::FontBigger => {
             state.font_size = (state.font_size + 1.0).min(34.0);
         }
+        Message::LangCycle => {
+            state.lang = state.lang.next();
+        }
         Message::FontSmaller => {
             state.font_size = (state.font_size - 1.0).max(14.0);
         }
@@ -973,6 +1080,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::OpenCard => open_card(state),
         Message::PageFirst => move_page(state, isize::MIN),
         Message::PageLast => move_page(state, isize::MAX),
+        Message::TranslatePage => translate_current(state),
+        Message::CycleTarget => {
+            state.target_lang = match state.target_lang.as_str() {
+                "en" => String::from("fr"),
+                "fr" => String::from("ar"),
+                _ => String::from("en"),
+            };
+        }
         Message::Hint(text) => {
             state.status = text.to_string();
         }
@@ -1034,6 +1149,7 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
         tool_btn("stop", Message::Hint("no background task")),
         tool_btn("globe", Message::PanelSelected(Panel::Downloads)),
         tool_btn(theme_icon, Message::ThemeToggle),
+        button(ar(state.lang.code(), 14.0)).on_press(Message::LangCycle),
         tool_btn("help", Message::About),
         tool_btn("plus", Message::OpenDatabase),
         button(ar("A+", 14.0)).on_press(Message::FontBigger),
@@ -1046,7 +1162,7 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
 
 fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message> {
     if books.is_empty() {
-        return ar("لا نتائج", state.font_size);
+        return ar(tr(state.lang, "no_results"), state.font_size);
     }
     let items: Vec<Element<'_, Message>> = books
         .iter()
@@ -1065,7 +1181,7 @@ fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message>
 
 fn library_tree(state: &State) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
-    items.push(ar("الأقسام", title_size(state.font_size)));
+    items.push(ar(tr(state.lang, "sections"), title_size(state.font_size)));
     for category in &state.categories {
         let label = if Some(category.id) == state.active_category {
             format!("> {}", category.name)
@@ -1079,9 +1195,12 @@ fn library_tree(state: &State) -> Element<'_, Message> {
                 .into(),
         );
     }
-    items.push(ar("الكتب", title_size(state.font_size)));
+    items.push(ar(tr(state.lang, "books"), title_size(state.font_size)));
     if state.active_category.is_none() && state.active_author.is_none() {
-        items.push(ar("اختر قسما أو مؤلفا", item_size(state.font_size)));
+        items.push(ar(
+            tr(state.lang, "pick_section"),
+            item_size(state.font_size),
+        ));
     }
     for book in state.books.iter().take(200) {
         items.push(
@@ -1098,14 +1217,17 @@ fn library_tree(state: &State) -> Element<'_, Message> {
 
 fn authors_panel(state: &State) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
-    items.push(ar("المؤلفون", title_size(state.font_size)));
+    items.push(ar(tr(state.lang, "authors"), title_size(state.font_size)));
     let list: &[Author] = if state.query.trim().chars().count() >= MIN_QUERY_CHARS {
         &state.author_results
     } else {
         &state.authors
     };
     if list.is_empty() {
-        items.push(ar("ابحث باسم مؤلف", item_size(state.font_size)));
+        items.push(ar(
+            tr(state.lang, "type_author"),
+            item_size(state.font_size),
+        ));
     }
     for author in list.iter().take(200) {
         let label = if author.death_text.is_empty() {
@@ -1127,7 +1249,7 @@ fn authors_panel(state: &State) -> Element<'_, Message> {
 
 fn bookmark_list(state: &State) -> Element<'_, Message> {
     if state.bookmarks.is_empty() {
-        return ar("لا عناصر بعد", state.font_size);
+        return ar(tr(state.lang, "no_bookmarks"), state.font_size);
     }
     let items: Vec<Element<'_, Message>> = state
         .bookmarks
@@ -1137,7 +1259,8 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
                 button(ar(mark.title.as_str(), item_size(state.font_size)))
                     .on_press(Message::BookOpened(mark.id))
                     .width(Length::Fill),
-                button(ar("حذف", 14.0)).on_press(Message::BookmarkRemove(mark.id)),
+                button(ar(tr(state.lang, "delete"), 14.0))
+                    .on_press(Message::BookmarkRemove(mark.id)),
             ]
             .spacing(4)
             .into()
@@ -1152,7 +1275,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
     let input = text_input("archive.org item id ...", state.dl_id.as_str())
         .on_input(Message::DownloadIdInput)
         .padding(8);
-    let fetch = button(ar("جلب الكتب", 14.0))
+    let fetch = button(ar(tr(state.lang, "fetch_books"), 14.0))
         .on_press(Message::DownloadList)
         .width(Length::Fill);
     let mut items: Vec<Element<'_, Message>> = vec![input.into(), fetch.into()];
@@ -1172,7 +1295,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
 }
 
 fn sidebar(state: &State) -> Element<'_, Message> {
-    let search = text_input("بحث ...", state.query.as_str())
+    let search = text_input(tr(state.lang, "search_hint"), state.query.as_str())
         .on_input(Message::SearchInput)
         .padding(8);
     let list =
@@ -1193,7 +1316,7 @@ fn sidebar(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
+fn reader_tab_view(tab: &ReaderTab, font_size: f32, target: &str) -> Element<'_, Message> {
     let label = match tab.pages.get(tab.index) {
         Some(page) => {
             let position = format!("page {} / {}", tab.index + 1, tab.pages.len());
@@ -1205,16 +1328,23 @@ fn reader_tab_view(tab: &ReaderTab, font_size: f32) -> Element<'_, Message> {
         }
         None => String::from("no pages"),
     };
+    let shown = if tab.show_translation {
+        tab.translation.as_deref().unwrap_or(tab.rendered.as_str())
+    } else {
+        tab.rendered.as_str()
+    };
     let nav = row![
         button(ticon("next", 18.0)).on_press(Message::ReaderNext),
         text(label).font(AMIRI).size(16.0),
         button(ticon("prev", 18.0)).on_press(Message::ReaderPrev),
+        button(ticon("lang", 18.0)).on_press(Message::TranslatePage),
+        button(ar(target.to_uppercase().as_str(), 13.0)).on_press(Message::CycleTarget),
     ]
     .spacing(8);
     let page_view = column![
         nav,
         scrollable(
-            text(tab.rendered.as_str())
+            text(shown)
                 .font(AMIRI)
                 .size(font_size)
                 .shaping(Shaping::Advanced)
@@ -1303,12 +1433,12 @@ fn reader(state: &State) -> Element<'_, Message> {
                         tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
                     ]
                     .spacing(8),
-                    reader_tab_view(reader_tab, state.font_size),
+                    reader_tab_view(reader_tab, state.font_size, &state.target_lang),
                 ]
                 .spacing(8)
                 .into(),
             },
-            None => ar("اختر كتابا من القائمة", state.font_size),
+            None => ar(tr(state.lang, "choose_book"), state.font_size),
         };
     column![tab_bar, content]
         .spacing(8)
@@ -1317,14 +1447,14 @@ fn reader(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn welcome() -> Element<'static, Message> {
-    let open = button(ar("فتح قاعدة البيانات", 18.0))
+fn welcome(state: &State) -> Element<'static, Message> {
+    let open = button(ar(tr(state.lang, "open_db"), 18.0))
         .on_press(Message::OpenDatabase)
         .width(Length::Fixed(300.0));
-    let import = button(ar("استيراد BOK", 18.0))
+    let import = button(ar(tr(state.lang, "import_bok"), 18.0))
         .on_press(Message::ImportBok)
         .width(Length::Fixed(300.0));
-    let downloads = button(ar("تحميل من archive.org", 18.0))
+    let downloads = button(ar(tr(state.lang, "download_from_net"), 18.0))
         .on_press(Message::PanelSelected(Panel::Downloads))
         .width(Length::Fixed(300.0));
     let logo = Svg::new(Handle::from_memory(
@@ -1332,9 +1462,15 @@ fn welcome() -> Element<'static, Message> {
     ))
     .width(Length::Fixed(110.0))
     .height(Length::Fixed(110.0));
-    let body = column![logo, ar(WELCOME_TEXT, 15.0), open, import, downloads,]
-        .spacing(12)
-        .width(Length::Shrink);
+    let body = column![
+        logo,
+        ar(tr(state.lang, "welcome"), 15.0),
+        open,
+        import,
+        downloads,
+    ]
+    .spacing(12)
+    .width(Length::Shrink);
     row![
         Space::with_width(Length::Fill),
         container(body).padding(24),
@@ -1356,7 +1492,7 @@ fn status_bar(state: &State) -> Element<'_, Message> {
 fn view(state: &State) -> Element<'_, Message> {
     let top = tool_bar(state);
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
-        welcome()
+        welcome(state)
     } else {
         row![reader(state), sidebar(state)]
             .spacing(8)
