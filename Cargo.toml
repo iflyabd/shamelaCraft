@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/shamela-db",
+    "crates/shamela-index",
+    "crates/shamelacraft",
+]

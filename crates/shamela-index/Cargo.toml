@@ -1,0 +1,9 @@
+[package]
+name = "shamela-index"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Arabic-normalizing full-text index (tantivy) for ShamelaCraft"
+
+[dependencies]
+tantivy = "0.24"

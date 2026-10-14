@@ -1,0 +1,9 @@
+[package]
+name = "shamela-db"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Read-only access to Shamela-4 library metadata databases (SQLite master.db)"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }

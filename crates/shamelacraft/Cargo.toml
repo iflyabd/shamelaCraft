@@ -1,0 +1,17 @@
+[package]
+name = "shamelacraft"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "ShamelaCraft - lightweight open-source Arabic library reader"
+
+[[bin]]
+name = "shamelacraft"
+path = "src/main.rs"
+
+[dependencies]
+iced = "0.13"
+rfd = "0.15"
+rusqlite = { version = "0.32", features = ["bundled"] }
+shamela-db = { path = "../shamela-db" }
+shamela-index = { path = "../shamela-index" }
