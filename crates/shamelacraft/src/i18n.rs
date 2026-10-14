@@ -108,6 +108,6 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Ar, "delete") => "حذف",
         (Lang::En, "delete") => "Delete",
         (Lang::Fr, "delete") => "Supprimer",
-        _ => key,
+        _ => "?",
     }
 }

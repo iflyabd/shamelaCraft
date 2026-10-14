@@ -45,7 +45,7 @@ impl TranslationCache {
             .conn
             .prepare("SELECT text FROM translations WHERE key = ?1")?;
         let mut rows = stmt.query_map(params![key], |row| row.get(0))?;
-        Ok(rows.next().transpose()?)
+        rows.next().transpose()
     }
 
     /// Store a translation.

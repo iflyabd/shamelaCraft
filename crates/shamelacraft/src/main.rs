@@ -1316,7 +1316,11 @@ fn sidebar(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-fn reader_tab_view(tab: &ReaderTab, font_size: f32, target: &str) -> Element<'_, Message> {
+fn reader_tab_view<'a>(
+    tab: &'a ReaderTab,
+    font_size: f32,
+    target: &'a str,
+) -> Element<'a, Message> {
     let label = match tab.pages.get(tab.index) {
         Some(page) => {
             let position = format!("page {} / {}", tab.index + 1, tab.pages.len());
