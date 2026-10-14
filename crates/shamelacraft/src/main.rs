@@ -1505,7 +1505,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
             .iter()
             .map(|verse| {
                 let label = format!("S{}:{} {}", verse.sura, verse.aya, verse.text);
-                ar(label.as_str(), item_size(state.font_size)).into()
+                ar(label.as_str(), item_size(state.font_size))
             })
             .collect()
     } else {
@@ -1514,7 +1514,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
             .iter()
             .map(|verse| {
                 let label = format!("({}) {}", verse.aya, verse.text);
-                ar(label.as_str(), item_size(state.font_size)).into()
+                ar(label.as_str(), item_size(state.font_size))
             })
             .collect()
     };
@@ -1603,7 +1603,7 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         button(ar(target.to_uppercase().as_str(), 13.0)).on_press(Message::CycleTarget),
     ]
     .spacing(8);
-    let mut note_items: Vec<Element<'_, Message>> = vec![ar(tr(state.lang, "notes"), 14.0).into()];
+    let mut note_items: Vec<Element<'_, Message>> = vec![ar(tr(state.lang, "notes"), 14.0)];
     for note in &state.notes {
         note_items.push(
             row![
