@@ -1554,9 +1554,15 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
 }
 
 fn sidebar(state: &State) -> Element<'_, Message> {
-    let search = text_input(tr(state.lang, "search_hint"), state.query.as_str())
-        .on_input(Message::SearchInput)
-        .padding(8);
+    let show_search = matches!(state.panel, Panel::Library | Panel::Authors);
+    let search: Element<'_, Message> = if show_search {
+        text_input(tr(state.lang, "search_hint"), state.query.as_str())
+            .on_input(Message::SearchInput)
+            .padding(8)
+            .into()
+    } else {
+        Space::with_height(Length::Fixed(0.0)).into()
+    };
     let list =
         if state.query.trim().chars().count() >= MIN_QUERY_CHARS && state.panel == Panel::Library {
             book_buttons(state, &state.results)

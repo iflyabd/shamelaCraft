@@ -237,11 +237,13 @@ impl BookWriter {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS Page (
+            "DROP TABLE IF EXISTS Page;
+            DROP TABLE IF EXISTS Title;
+            CREATE TABLE Page (
                 id INTEGER, content TEXT, part TEXT, page TEXT,
                 number TEXT, services TEXT, is_deleted TEXT
             );
-            CREATE TABLE IF NOT EXISTS Title (
+            CREATE TABLE Title (
                 id INTEGER, content TEXT, page INTEGER,
                 parent INTEGER, is_deleted TEXT
             );",
