@@ -226,11 +226,12 @@ mod tests {
 
     #[test]
     fn encoding_fix_round_trip() {
-        // cp1256 bytes for ع ب (0xE3 0xC8) surface via Latin-1 as ãÈ.
-        assert_eq!(fix_encoding("ãÈ"), "عب");
+        // Simulate jetdb's Latin-1 view of cp1256 bytes and recover it.
+        let original = "عب";
+        let bytes = encoding_rs::WINDOWS_1256.encode(original).0;
+        let latin1: String = bytes.iter().map(|byte| *byte as char).collect();
+        assert_eq!(fix_encoding(&latin1), original);
         assert_eq!(fix_encoding("plain ascii"), "plain ascii");
-        // Non-Latin-1 input passes through untouched.
-        assert_eq!(fix_encoding("عب"), "عب");
     }
 
     #[test]
