@@ -339,6 +339,15 @@ fn self_test(master: &str, bok: &str) -> i32 {
             failures += 1;
         }
     }
+    if std::env::var("TRANSLATE_TEST").as_deref() == Ok("1") {
+        match shamela_import::translate::translate_chunk("Hello world", "en", "ar") {
+            Ok(text) => println!("TRANSLATE OK {text}"),
+            Err(err) => {
+                println!("TRANSLATE FAIL: {err}");
+                failures += 1;
+            }
+        }
+    }
     if failures == 0 {
         println!("SELFTEST PASS");
     } else {
