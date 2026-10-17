@@ -430,6 +430,38 @@ fn ar(content: impl Into<String>, size: f32) -> Element<'static, Message> {
         .into()
 }
 
+/// Rough rendered width (px) of a mixed Arabic/Latin string in Amiri at
+/// `size`. Overestimating only adds harmless padding.
+fn text_width_est(content: &str, size: f32) -> f32 {
+    let mut units = 0.0f32;
+    for ch in content.chars() {
+        units += match ch {
+            ' ' => 0.30,
+            '\u{0600}'..='\u{06FF}' | '\u{FB50}'..='\u{FEFF}' => 0.52,
+            'a'..='z' | 'A'..='Z' => 0.62,
+            '0'..='9' => 0.55,
+            _ => 0.45,
+        };
+    }
+    (units * size + 12.0).max(size * 2.0)
+}
+
+/// Label for shrink-sized controls (button content, tabs, rows followed by
+/// more elements). iced lays RTL glyphs out right-aligned inside the layout
+/// limits the text receives; a shrink-sized text can be measured against a
+/// much wider limit than its own bounds, pushing the glyphs outside the
+/// control. A fixed estimated width keeps the glyphs inside the box.
+fn ar_boxed(content: impl Into<String>, size: f32) -> Element<'static, Message> {
+    let content = content.into();
+    let width = text_width_est(&content, size);
+    text(content)
+        .font(AMIRI)
+        .size(size)
+        .shaping(Shaping::Advanced)
+        .width(Length::Fixed(width))
+        .into()
+}
+
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
@@ -3007,7 +3039,7 @@ fn reader(state: &State) -> Element<'_, Message> {
         .map(|(index, tab)| {
             let label: String = tab.title.chars().take(20).collect();
             let active = state.active_tab == Some(index);
-            let tab_button = button(ar(label, 13.0)).on_press(Message::TabSelected(index));
+            let tab_button = button(ar_boxed(label, 13.0)).on_press(Message::TabSelected(index));
             let tab_button = if active {
                 tab_button.style(accent_style(chrome.accent, chrome.radius))
             } else {
@@ -3052,8 +3084,8 @@ fn reader(state: &State) -> Element<'_, Message> {
                         row![
                             button(ticon("prev", 18.0)).on_press(Message::ReaderPrev),
                             button(ticon("next", 18.0)).on_press(Message::ReaderNext),
-                            button(ar(tafsir_label, 14.0)).on_press(Message::TafsirCycle),
-                            button(ar(tr(state.lang, "tafsir"), 14.0))
+                            button(ar_boxed(tafsir_label, 14.0)).on_press(Message::TafsirCycle),
+                            button(ar_boxed(tr(state.lang, "tafsir"), 14.0))
                                 .on_press(Message::TafsirToggle)
                                 .style(accent_style(
                                     if state.show_tafsir {
@@ -3277,7 +3309,7 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
     };
     let title = row![
         ticon("options", 22.0),
-        ar(tr(state.lang, "settings"), 18.0),
+        ar_boxed(tr(state.lang, "settings"), 18.0),
         Space::with_width(Length::Fill),
         button(ticon("x", 18.0)).on_press(Message::ToggleSettings),
     ]
@@ -3413,21 +3445,22 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     let dark = matches!(state.theme_kind, AppTheme::Dark);
     let title = row![
         ticon("globe", 22.0),
-        ar(tr(state.lang, "downloads"), 18.0),
+        ar_boxed(tr(state.lang, "downloads"), 18.0),
         Space::with_width(Length::Fill),
         button(ticon("x", 18.0)).on_press(Message::DlToggle),
     ]
     .spacing(8);
     let controls = row![
-        button(ar(tr(state.lang, "download_all"), 14.0)).on_press(Message::DownloadAll),
-        button(ar(tr(state.lang, "download_current"), 14.0)).on_press(Message::DownloadCurrent),
-        button(ar(tr(state.lang, "fetch_books"), 14.0)).on_press(Message::DownloadList),
-        button(ar(tr(state.lang, "cancel"), 14.0)).on_press(Message::DlCancel),
+        button(ar_boxed(tr(state.lang, "download_all"), 14.0)).on_press(Message::DownloadAll),
+        button(ar_boxed(tr(state.lang, "download_current"), 14.0))
+            .on_press(Message::DownloadCurrent),
+        button(ar_boxed(tr(state.lang, "fetch_books"), 14.0)).on_press(Message::DownloadList),
+        button(ar_boxed(tr(state.lang, "cancel"), 14.0)).on_press(Message::DlCancel),
     ]
     .spacing(6);
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if state.dl_queue.is_empty() {
-        rows.push(ar(tr(state.lang, "no_downloads"), 15.0));
+        rows.push(ar_boxed(tr(state.lang, "no_downloads"), 15.0));
     }
     for job in &state.dl_queue {
         let status = if let Some(err) = &job.failed {
@@ -3440,24 +3473,24 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         let mut actions: Vec<Element<'_, Message>> = Vec::new();
         if job.failed.is_some() {
             actions.push(
-                button(ar(tr(state.lang, "retry"), 13.0))
+                button(ar_boxed(tr(state.lang, "retry"), 13.0))
                     .on_press(Message::DlRetry(job.id))
                     .into(),
             );
             actions.push(
-                button(ar(tr(state.lang, "remove"), 13.0))
+                button(ar_boxed(tr(state.lang, "remove"), 13.0))
                     .on_press(Message::DlRemove(job.id))
                     .into(),
             );
         } else if job.done {
             actions.push(
-                button(ar(tr(state.lang, "remove"), 13.0))
+                button(ar_boxed(tr(state.lang, "remove"), 13.0))
                     .on_press(Message::DlRemove(job.id))
                     .into(),
             );
         } else {
             actions.push(
-                button(ar(tr(state.lang, "cancel"), 13.0))
+                button(ar_boxed(tr(state.lang, "cancel"), 13.0))
                     .on_press(Message::DlCancel)
                     .into(),
             );
@@ -3486,7 +3519,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
             row![
                 ar(label, 13.0),
                 Space::with_width(Length::Fill),
-                button(ar(tr(state.lang, "downloads"), 12.0))
+                button(ar_boxed(tr(state.lang, "downloads"), 12.0))
                     .on_press(Message::DownloadFile(file.name.clone())),
             ]
             .spacing(4)
@@ -3517,20 +3550,12 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
 /// Toggle row with ASCII state box (always renders) plus label.
 fn toggle_row(label: String, on: bool, msg: Message) -> Element<'static, Message> {
     let mark = if on { "[x]" } else { "[ ]" };
-    button(
-        row![
-            Space::with_width(Length::Fill),
-            ar(label, 15.0),
-            ar(mark, 15.0),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center),
-    )
-    .on_press(msg)
-    .style(button::text)
-    .width(Length::Fill)
-    .padding(6)
-    .into()
+    button(ar(format!("{mark} {label}"), 15.0))
+        .on_press(msg)
+        .style(button::text)
+        .width(Length::Fill)
+        .padding(6)
+        .into()
 }
 
 /// Global hotkeys mirroring the classic program (F5/F6 pages, F3 search,
