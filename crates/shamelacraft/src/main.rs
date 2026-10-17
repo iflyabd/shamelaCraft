@@ -11,8 +11,11 @@
 
 use iced::widget::pane_grid::{self, Axis};
 use iced::widget::svg::{Handle, Svg};
-use iced::widget::text::Shaping;
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space, Stack};
+use iced::widget::text::{LineHeight, Shaping};
+use iced::widget::tooltip::{Position, Tooltip};
+use iced::widget::{
+    button, column, container, progress_bar, row, scrollable, text, text_input, Space, Stack,
+};
 use iced::{clipboard, Element, Font, Length, Task, Theme};
 use iced::{keyboard, Background, Color};
 use shamela_content::book::{BookDb, TocNode};
@@ -23,12 +26,16 @@ mod i18n;
 use i18n::{tr, Lang};
 use shamela_index::{BookIndex, NormalizeOptions};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Project pages opened by Help / Live update.
+const HELP_URL: &str = "https://github.com/iflyabd/shamelaCraft#readme";
+const RELEASES_URL: &str = "https://github.com/iflyabd/shamelaCraft/releases";
 
 /// Bundled Arabic font (Amiri, SIL OFL — see assets/fonts/OFL.txt).
 const AMIRI: Font = Font::with_name("Amiri");
 const SEARCH_LIMIT: i64 = 100;
 const MIN_QUERY_CHARS: usize = 2;
-const SIDEBAR_WIDTH: f32 = 320.0;
 
 fn about_text(lang: Lang) -> &'static str {
     match lang {
@@ -99,6 +106,66 @@ impl std::fmt::Display for AppTheme {
     }
 }
 
+/// Interface accent presets (all white-text safe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Accent {
+    #[default]
+    Royal,
+    Emerald,
+    Maroon,
+    Amber,
+}
+
+impl Accent {
+    fn color(self) -> Color {
+        match self {
+            Self::Royal => Color::from_rgb(0.20, 0.35, 0.86),
+            Self::Emerald => Color::from_rgb(0.05, 0.45, 0.28),
+            Self::Maroon => Color::from_rgb(0.55, 0.13, 0.18),
+            Self::Amber => Color::from_rgb(0.72, 0.53, 0.10),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Royal => "Royal",
+            Self::Emerald => "Emerald",
+            Self::Maroon => "Maroon",
+            Self::Amber => "Amber",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Royal => Self::Emerald,
+            Self::Emerald => Self::Maroon,
+            Self::Maroon => Self::Amber,
+            Self::Amber => Self::Royal,
+        }
+    }
+}
+
+/// Resolved chrome: accent color + corner radius.
+#[derive(Debug, Clone, Copy)]
+struct Chrome {
+    accent: Color,
+    radius: f32,
+}
+
+/// Accent button style used for toolbar, tabs and selected rows.
+fn accent_style(accent: Color, radius: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_: &Theme, _| button::Style {
+        background: Some(Background::Color(accent)),
+        text_color: Color::WHITE,
+        border: iced::border::Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: iced::border::Radius::new(radius),
+        },
+        ..button::Style::default()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ReaderTab {
     pages: Vec<shamela_content::book::Page>,
@@ -121,6 +188,8 @@ struct Tab {
     book_id: i64,
     title: String,
     kind: TabKind,
+    /// Local SQLite file when the book came from a downloaded/imported file.
+    db: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +218,28 @@ enum Message {
     DownloadIdInput(String),
     DownloadList,
     DownloadFile(String),
+    DownloadAll,
+    DownloadOpen,
+    DlTick,
+    DlToggle,
+    DlRemove(usize),
+    DlRetry(usize),
+    DlCancel,
+    DownloadCurrent,
+    AccentNext,
+    ToggleCorners,
+    LineBigger,
+    LineSmaller,
+    ReaderFgNext,
+    ReaderBgNext,
+    TafsirCycle,
+    TafsirToggle,
+    OpenReleases,
+    OpenHelp,
+    SharhLink,
+    EscapePressed,
+    ToggleReopenLast,
+    ToggleNotifySearch,
     FontBigger,
     FontSmaller,
     LangCycle,
@@ -179,11 +270,28 @@ enum Message {
     ToggleOptTatweel,
     ClearCache,
     ResetAll,
-    CloseActiveTab,
     OpenImported(String),
     FindPage,
     DeleteBook(String),
-    Hint(&'static str),
+}
+
+/// What to do with a file once its download finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterDl {
+    ImportBok,
+    ImportArchive,
+}
+
+/// One background download job (progress shared with its worker thread).
+struct QueueItem {
+    id: usize,
+    label: String,
+    url: String,
+    dest: PathBuf,
+    after: AfterDl,
+    progress: Arc<shamela_import::download::DlProgress>,
+    done: bool,
+    failed: Option<String>,
 }
 
 struct State {
@@ -206,6 +314,10 @@ struct State {
     quran_sura: i64,
     quran_query: String,
     quran_results: Vec<shamela_content::quran::Verse>,
+    tafsir_ix: usize,
+    show_tafsir: bool,
+    tafsir_for: Option<i64>,
+    tafsir_lines: Vec<String>,
     note_input: String,
     notes: Vec<shamela_content::notes::Note>,
     panes: pane_grid::State<PaneKind>,
@@ -213,11 +325,21 @@ struct State {
     show_notes: bool,
     show_tashkeel: bool,
     show_settings: bool,
+    accent: Accent,
+    rounded: bool,
+    line_height: f32,
+    reader_text: Color,
+    reader_bg: Color,
+    notify_search: bool,
+    reopen_last: bool,
     search_opts: NormalizeOptions,
     control_files: Vec<(String, u64)>,
     target_lang: String,
     dl_id: String,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
+    dl_queue: Vec<QueueItem>,
+    dl_next_id: usize,
+    show_downloads: bool,
     font_size: f32,
     theme_kind: AppTheme,
     status: String,
@@ -246,6 +368,10 @@ impl Default for State {
             quran_sura: 1,
             quran_query: String::new(),
             quran_results: Vec::new(),
+            tafsir_ix: 0,
+            show_tafsir: false,
+            tafsir_for: None,
+            tafsir_lines: Vec::new(),
             note_input: String::new(),
             notes: Vec::new(),
             panes: init_panes(),
@@ -253,19 +379,32 @@ impl Default for State {
             show_notes: true,
             show_tashkeel: true,
             show_settings: false,
+            accent: Accent::Royal,
+            rounded: true,
+            line_height: 1.6,
+            reader_text: Color::BLACK,
+            reader_bg: Color::WHITE,
+            notify_search: true,
+            reopen_last: true,
             search_opts: NormalizeOptions::default(),
             control_files: Vec::new(),
             target_lang: String::from("en"),
             dl_id: String::from("shamela-16241"),
+            dl_queue: Vec::new(),
+            dl_next_id: 1,
+            show_downloads: false,
             dl_files: Vec::new(),
-            font_size: 22.0,
+            font_size: 24.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
         };
-        if let Ok(saved) = std::fs::read_to_string(last_db_path()) {
-            let path = PathBuf::from(saved.trim());
-            if path.is_file() {
-                open_database_path(&mut state, Some(path));
+        load_settings(&mut state);
+        if state.reopen_last {
+            if let Ok(saved) = std::fs::read_to_string(last_db_path()) {
+                let path = PathBuf::from(saved.trim());
+                if path.is_file() {
+                    open_database_path(&mut state, Some(path));
+                }
             }
         }
         state
@@ -332,21 +471,53 @@ fn ticon(name: &'static str, px: f32) -> Element<'static, Message> {
 /// List row in the classic browser style: transparent until hovered,
 /// highlighted when selected. Used for the three browse lists
 /// (categories, books, authors) and everywhere a list belongs.
-fn list_row(label: String, selected: bool, msg: Message, size: f32) -> Element<'static, Message> {
+fn list_row(
+    label: String,
+    selected: bool,
+    msg: Message,
+    size: f32,
+    chrome: Chrome,
+) -> Element<'static, Message> {
     let content = button(ar(label, size))
         .on_press(msg)
         .width(Length::Fill)
         .padding(6);
     if selected {
-        content.style(button::primary).into()
+        content
+            .style(accent_style(chrome.accent, chrome.radius))
+            .into()
     } else {
         content.style(button::text).into()
     }
 }
 
-/// Icon toolbar button.
-fn tool_btn(icon: &'static str, msg: Message) -> Element<'static, Message> {
-    button(ticon(icon, 22.0)).on_press(msg).padding(5).into()
+impl State {
+    fn chrome(&self) -> Chrome {
+        Chrome {
+            accent: self.accent.color(),
+            radius: if self.rounded { 8.0 } else { 1.5 },
+        }
+    }
+}
+
+/// Icon toolbar button with bilingual hover label.
+fn tool_btn(
+    icon: &'static str,
+    tip: (&'static str, &'static str),
+    msg: Message,
+    chrome: Chrome,
+) -> Element<'static, Message> {
+    let label = format!("{} / {}", tip.0, tip.1);
+    Tooltip::new(
+        button(ticon(icon, 22.0))
+            .on_press(msg)
+            .padding(5)
+            .style(accent_style(chrome.accent, chrome.radius)),
+        ar(label, 13.0),
+        Position::Bottom,
+    )
+    .gap(8.0)
+    .into()
 }
 
 /// Reader | books | side navigation, user-resizable via drag handles.
@@ -443,6 +614,96 @@ fn self_test(master: &str, bok: &str) -> i32 {
     failures
 }
 
+fn settings_path() -> PathBuf {
+    data_dir().join("settings.txt")
+}
+
+/// Persist every user-tweakable option (mirrors the original options dialog).
+fn save_settings(state: &State) {
+    let theme = match state.theme_kind {
+        AppTheme::Light => "light",
+        AppTheme::Dark => "dark",
+    };
+    let lang = match state.lang {
+        Lang::Ar => "ar",
+        Lang::En => "en",
+        Lang::Fr => "fr",
+    };
+    let accent = match state.accent {
+        Accent::Royal => "royal",
+        Accent::Emerald => "emerald",
+        Accent::Maroon => "maroon",
+        Accent::Amber => "amber",
+    };
+    let body = format!(
+        "font={}\ntheme={theme}\nlang={lang}\naccent={accent}\nrounded={}\nline={:.1}\n\ntashkeel={}\nhamza={}\nsearch_tashkeel={}\ntatweel={}\nreopen={}\nnotify={}\n",
+        state.font_size,
+        u8::from(state.rounded),
+        state.line_height,
+        u8::from(state.show_tashkeel),
+        u8::from(state.search_opts.unify_hamza),
+        u8::from(state.search_opts.strip_tashkeel),
+        u8::from(state.search_opts.strip_tatweel),
+        u8::from(state.reopen_last),
+        u8::from(state.notify_search),
+    );
+    let _ = std::fs::write(settings_path(), body);
+}
+
+fn load_settings(state: &mut State) {
+    let Ok(text) = std::fs::read_to_string(settings_path()) else {
+        return;
+    };
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "font" => {
+                if let Ok(size) = value.parse::<f32>() {
+                    state.font_size = size.clamp(14.0, 34.0);
+                }
+            }
+            "theme" => {
+                state.theme_kind = if value == "dark" {
+                    AppTheme::Dark
+                } else {
+                    AppTheme::Light
+                };
+            }
+            "lang" => {
+                state.lang = match value {
+                    "en" => Lang::En,
+                    "fr" => Lang::Fr,
+                    _ => Lang::Ar,
+                };
+            }
+            "accent" => {
+                state.accent = match value {
+                    "emerald" => Accent::Emerald,
+                    "maroon" => Accent::Maroon,
+                    "amber" => Accent::Amber,
+                    _ => Accent::Royal,
+                };
+            }
+            "rounded" => state.rounded = value == "1",
+            "line" => {
+                if let Ok(height) = value.parse::<f32>() {
+                    state.line_height = height.clamp(1.0, 2.4);
+                }
+            }
+            "tashkeel" => state.show_tashkeel = value == "1",
+            "hamza" => state.search_opts.unify_hamza = value == "1",
+            "search_tashkeel" => state.search_opts.strip_tashkeel = value == "1",
+            "tatweel" => state.search_opts.strip_tatweel = value == "1",
+            "reopen" => state.reopen_last = value == "1",
+            "notify" => state.notify_search = value == "1",
+            _ => {}
+        }
+    }
+}
+
 fn bookmarks_path() -> PathBuf {
     data_dir().join("bookmarks.db")
 }
@@ -494,7 +755,7 @@ fn build_index_opts(lib: &Library, opts: &NormalizeOptions) -> Result<BookIndex,
         }
     }
     index
-        .add_books(&docs, &opts)
+        .add_books(&docs, opts)
         .map_err(|err| err.to_string())?;
     Ok(index)
 }
@@ -612,6 +873,13 @@ fn run_search(state: &mut State) {
     if let Ok(authors) = lib.search_authors(&query, SEARCH_LIMIT) {
         state.author_results = authors;
     }
+    if state.notify_search {
+        state.status = format!(
+            "{} books / {} authors",
+            state.results.len(),
+            state.author_results.len()
+        );
+    }
 }
 
 fn render_book_card(state: &State, book: &Book) -> String {
@@ -656,6 +924,7 @@ fn open_about(state: &mut State) {
         book_id: -1,
         title: String::from("about"),
         kind: TabKind::Card(about_text(state.lang).to_string()),
+        db: None,
     });
     state.active_tab = Some(state.tabs.len() - 1);
 }
@@ -680,6 +949,7 @@ fn open_quran_tab(state: &mut State, sura: i64) {
         book_id: -(100000 + sura),
         title: name.to_string(),
         kind: TabKind::Quran { sura, verses },
+        db: None,
     });
     state.active_tab = Some(state.tabs.len() - 1);
 }
@@ -704,6 +974,7 @@ fn open_tab(state: &mut State, book_id: i64) {
         book_id,
         title: book.name.clone(),
         kind: TabKind::Card(body),
+        db: None,
     });
     state.active_tab = Some(state.tabs.len() - 1);
 }
@@ -747,7 +1018,7 @@ fn import_bok_file(state: &mut State, dest: &std::path::Path, stem: String) {
     };
     let book_id = book.meta.id;
     match shamela_import::convert::bok_to_book_db(&book, &out) {
-        Ok(()) => open_imported_db(state, &out, title, book_id),
+        Ok(()) => open_imported_db(state, &out, title, book_id, None),
         Err(err) => state.status = format!("convert failed: {err}"),
     }
 }
@@ -759,6 +1030,7 @@ fn open_imported_pages(
     toc: Vec<shamela_content::book::TocNode>,
     title: String,
     book_id: i64,
+    db_path: Option<PathBuf>,
 ) {
     if pages.is_empty() {
         state.status = String::from("no pages");
@@ -772,6 +1044,7 @@ fn open_imported_pages(
     state.tabs.push(Tab {
         book_id,
         title: title.clone(),
+        db: db_path,
         kind: TabKind::Reader(ReaderTab {
             pages,
             index: 0,
@@ -787,7 +1060,18 @@ fn open_imported_pages(
 }
 
 /// Open a converted `Page`/`Title` database file in a reader tab.
-fn open_imported_db(state: &mut State, out: &std::path::Path, title: String, book_id: i64) {
+fn open_imported_db(
+    state: &mut State,
+    out: &std::path::Path,
+    title: String,
+    book_id: i64,
+    origin: Option<String>,
+) {
+    if let Some(url) = origin {
+        if let Some(stem) = out.file_stem().and_then(|s| s.to_str()) {
+            let _ = std::fs::write(books_dir().join(format!("{stem}.db.url")), url);
+        }
+    }
     let (pages, toc) = match BookDb::open(out) {
         Ok(db) => (db.pages().unwrap_or_default(), db.toc().unwrap_or_default()),
         Err(err) => {
@@ -795,7 +1079,7 @@ fn open_imported_db(state: &mut State, out: &std::path::Path, title: String, boo
             return;
         }
     };
-    open_imported_pages(state, pages, toc, title, book_id);
+    open_imported_pages(state, pages, toc, title, book_id, Some(out.to_path_buf()));
 }
 
 /// Refresh the importable file list of the configured archive.org item.
@@ -819,69 +1103,429 @@ fn refresh_download_list(state: &mut State) {
     }
 }
 
-/// Download one file from the configured item and import it.
-/// `.bok` files import directly; archives are extracted first and every
-/// contained book is imported (the first one opens automatically).
-fn download_file(state: &mut State, name: String) {
-    let id = state.dl_id.trim().to_string();
-    let url = shamela_import::archive::download_url(&id, &name);
-    let file_name = name.rsplit('/').next().unwrap_or(&name).to_string();
-    let dest = books_dir().join(&file_name);
-    state.status = format!("downloading: {name} ...");
-    if let Err(err) = shamela_import::archive::download_to(&url, &dest) {
-        state.status = format!("download failed: {err}");
+/// Queue a download; starts it immediately when the lane is free.
+fn enqueue(state: &mut State, label: String, url: String, dest: PathBuf, after: AfterDl) {
+    let id = state.dl_next_id;
+    state.dl_next_id += 1;
+    state.dl_queue.push(QueueItem {
+        id,
+        label,
+        url,
+        dest,
+        after,
+        progress: shamela_import::download::DlProgress::shared(),
+        done: false,
+        failed: None,
+    });
+    start_next(state);
+}
+
+/// Start the first queued job when no job is active.
+fn start_next(state: &mut State) {
+    if state
+        .dl_queue
+        .iter()
+        .any(|job| !job.done && job.failed.is_none() && started(job))
+    {
         return;
     }
-    if shamela_import::extract::archive_kind(&file_name).is_some() {
-        let stem = dest
-            .file_stem()
-            .and_then(|part| part.to_str())
-            .unwrap_or("book");
-        let dir = books_dir().join(format!("{stem}_files"));
-        match shamela_import::extract::extract_archive(&dest, &dir) {
-            Ok(boks) if !boks.is_empty() => {
-                let count = boks.len();
-                let mut opened = false;
-                for bok in &boks {
-                    let inner_stem = bok
-                        .file_stem()
-                        .and_then(|part| part.to_str())
-                        .unwrap_or("book")
-                        .to_string();
-                    let out = books_dir().join(format!("{inner_stem}.db"));
-                    let Ok(book) = shamela_import::bok::open_bok(bok) else {
-                        continue;
-                    };
+    if let Some(job) = state
+        .dl_queue
+        .iter_mut()
+        .find(|job| !job.done && job.failed.is_none() && !started(job))
+    {
+        let url = job.url.clone();
+        let dest = job.dest.clone();
+        let prog = job.progress.clone();
+        shamela_import::download::start_download(url, dest, prog);
+    }
+}
+
+fn started(job: &QueueItem) -> bool {
+    use std::sync::atomic::Ordering;
+    job.progress.written.load(Ordering::SeqCst) > 0 || job.progress.finished.load(Ordering::SeqCst)
+}
+
+/// Anything still to do?
+fn dl_active(state: &State) -> bool {
+    state
+        .dl_queue
+        .iter()
+        .any(|job| !job.done && job.failed.is_none())
+}
+
+/// Poll worker threads; finalize finished jobs (import/convert).
+fn poll_downloads(state: &mut State) {
+    use std::sync::atomic::Ordering;
+    let mut finished = Vec::new();
+    for job in &state.dl_queue {
+        if !job.done && job.failed.is_none() && job.progress.finished.load(Ordering::SeqCst) {
+            finished.push(job.id);
+        }
+    }
+    for id in finished {
+        finalize_download(state, id);
+    }
+    start_next(state);
+}
+
+fn finalize_download(state: &mut State, id: usize) {
+    use std::sync::atomic::Ordering;
+    let position = state.dl_queue.iter().position(|job| job.id == id);
+    let Some(index) = position else {
+        return;
+    };
+    if let Some(err) = state.dl_queue[index]
+        .progress
+        .failed
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
+        state.dl_queue[index].failed = Some(err);
+        state.dl_queue[index].done = true;
+        return;
+    }
+    let (dest, after, url) = {
+        let job = &state.dl_queue[index];
+        (job.dest.clone(), job.after, job.url.clone())
+    };
+    match after {
+        AfterDl::ImportBok => {
+            let stem = dest
+                .file_stem()
+                .and_then(|part| part.to_str())
+                .unwrap_or("book")
+                .to_string();
+            let out = books_dir().join(format!("{stem}.db"));
+            match shamela_import::bok::open_bok(&dest) {
+                Ok(book) => {
                     let title = if book.meta.title.is_empty() {
-                        inner_stem
+                        stem.clone()
                     } else {
                         book.meta.title.clone()
                     };
-                    if shamela_import::convert::bok_to_book_db(&book, &out).is_err() {
-                        continue;
-                    }
-                    if !opened {
-                        open_imported_db(state, &out, title, book.meta.id);
-                        opened = true;
+                    let book_id = book.meta.id;
+                    match shamela_import::convert::bok_to_book_db(&book, &out) {
+                        Ok(()) => {
+                            write_sidecar(&dest, &url);
+                            open_imported_db(state, &out, title, book_id, Some(url));
+                        }
+                        Err(err) => {
+                            state.dl_queue[index].failed = Some(format!("convert failed: {err}"));
+                            state.dl_queue[index].done = true;
+                        }
                     }
                 }
-                if opened {
-                    state.status = format!("archive {name}: {count} books imported");
-                } else {
-                    state.status = format!("archive {name}: {count} books, none readable");
+                Err(err) => {
+                    state.dl_queue[index].failed = Some(format!("BOK read failed: {err}"));
+                    state.dl_queue[index].done = true;
                 }
             }
-            Ok(_) => state.status = format!("archive {name}: no .bok inside"),
-            Err(err) => state.status = format!("extract failed: {err}"),
         }
+        AfterDl::ImportArchive => {
+            let stem = dest
+                .file_stem()
+                .and_then(|part| part.to_str())
+                .unwrap_or("book");
+            let dir = books_dir().join(format!("{stem}_files"));
+            match shamela_import::extract::extract_archive(&dest, &dir) {
+                Ok(boks) if !boks.is_empty() => {
+                    write_sidecar(&dest, &url);
+                    import_bok_list(state, &boks, &url);
+                }
+                Ok(_) => {
+                    state.dl_queue[index].failed = Some(String::from("no .bok inside"));
+                    state.dl_queue[index].done = true;
+                }
+                Err(err) => {
+                    state.dl_queue[index].failed = Some(format!("extract failed: {err}"));
+                    state.dl_queue[index].done = true;
+                }
+            }
+        }
+    }
+    let failed = state.dl_queue[index].failed.is_some();
+    state.dl_queue[index].done = true;
+    let _ = failed;
+    let _ = Ordering::SeqCst;
+}
+
+/// Remember where a downloaded file came from (per-opened-book downloads).
+fn write_sidecar(dest: &std::path::Path, url: &str) {
+    if let Some(name) = dest.file_name().and_then(|n| n.to_str()) {
+        let sidecar = books_dir().join(format!("{name}.url"));
+        let _ = std::fs::write(sidecar, url);
+    }
+}
+
+/// Import every converted book; open the first.
+fn import_bok_list(state: &mut State, boks: &[std::path::PathBuf], url: &str) {
+    let mut opened = false;
+    let mut count = 0;
+    for bok in boks {
+        let inner_stem = bok
+            .file_stem()
+            .and_then(|part| part.to_str())
+            .unwrap_or("book")
+            .to_string();
+        let out = books_dir().join(format!("{inner_stem}.db"));
+        let Ok(book) = shamela_import::bok::open_bok(bok) else {
+            continue;
+        };
+        let title = if book.meta.title.is_empty() {
+            inner_stem
+        } else {
+            book.meta.title.clone()
+        };
+        if shamela_import::convert::bok_to_book_db(&book, &out).is_err() {
+            continue;
+        }
+        count += 1;
+        if !opened {
+            open_imported_db(state, &out, title, book.meta.id, Some(url.to_string()));
+            opened = true;
+        }
+    }
+    if opened {
+        state.status = format!("archive: {count} books imported");
+    } else {
+        state.status = String::from("archive: books found, none readable");
+    }
+}
+
+fn downloads_dir() -> PathBuf {
+    let dir = data_dir().join("downloads");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Archive vs single book by extension.
+fn after_kind(name: &str) -> AfterDl {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".rar")
+        || lower.ends_with(".zip")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tgz")
+    {
+        AfterDl::ImportArchive
+    } else {
+        AfterDl::ImportBok
+    }
+}
+
+/// Queue one file from the configured archive.org item.
+fn enqueue_file(state: &mut State, name: String) {
+    let item = state.dl_id.trim().to_string();
+    if item.is_empty() {
+        state.status = String::from("enter an archive.org item id first");
         return;
     }
-    let stem = dest
+    let url = shamela_import::archive::download_url(&item, &name);
+    let file_name = name.rsplit('/').next().unwrap_or(&name).to_string();
+    let dest = downloads_dir().join(&file_name);
+    let after = after_kind(&file_name);
+    enqueue(state, file_name.clone(), url, dest, after);
+    state.status = format!("queued: {file_name}");
+}
+
+/// Re-download the book that is open right now (uses its recorded source URL).
+fn download_current(state: &mut State) {
+    let Some(tab) = state.active_tab.and_then(|index| state.tabs.get(index)) else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    let Some(db) = tab.db.clone() else {
+        state.status = String::from("this book has no local download source");
+        return;
+    };
+    let stem = db
         .file_stem()
         .and_then(|part| part.to_str())
         .unwrap_or("book")
         .to_string();
-    import_bok_file(state, &dest, stem);
+    let sidecar = books_dir().join(format!("{stem}.db.url"));
+    let Ok(url) = std::fs::read_to_string(&sidecar) else {
+        state.status = String::from("no source url recorded for this book");
+        return;
+    };
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        state.status = String::from("empty source url");
+        return;
+    }
+    let file_name = url.rsplit('/').next().unwrap_or("book.bok").to_string();
+    let dest = downloads_dir().join(&file_name);
+    let after = after_kind(&file_name);
+    enqueue(state, file_name.clone(), url, dest, after);
+    state.status = format!("re-downloading: {file_name}");
+}
+
+fn cancel_all(state: &mut State) {
+    use std::sync::atomic::Ordering;
+    let mut count = 0;
+    for job in &mut state.dl_queue {
+        if !job.done && job.failed.is_none() {
+            job.progress.cancel.store(true, Ordering::SeqCst);
+            count += 1;
+        }
+    }
+    state.status = if count == 0 {
+        String::from("nothing to stop")
+    } else {
+        format!("stopping {count} download(s)")
+    };
+}
+
+fn remove_job(state: &mut State, id: usize) {
+    use std::sync::atomic::Ordering;
+    if let Some(index) = state.dl_queue.iter().position(|job| job.id == id) {
+        if !state.dl_queue[index].done && state.dl_queue[index].failed.is_none() {
+            state.dl_queue[index]
+                .progress
+                .cancel
+                .store(true, Ordering::SeqCst);
+        }
+        state.dl_queue.remove(index);
+        start_next(state);
+    }
+}
+
+fn retry_job(state: &mut State, id: usize) {
+    use std::sync::atomic::Ordering;
+    if let Some(job) = state.dl_queue.iter_mut().find(|job| job.id == id) {
+        job.progress.written.store(0, Ordering::SeqCst);
+        job.progress.total.store(0, Ordering::SeqCst);
+        job.progress.finished.store(false, Ordering::SeqCst);
+        job.progress.cancel.store(false, Ordering::SeqCst);
+        if let Ok(mut slot) = job.progress.failed.lock() {
+            *slot = None;
+        }
+        job.failed = None;
+        job.done = false;
+    }
+    start_next(state);
+}
+
+fn tafsir_cache_dir() -> PathBuf {
+    let dir = data_dir().join("tafsir");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn quran_active(state: &State) -> bool {
+    matches!(
+        state
+            .active_tab
+            .and_then(|index| state.tabs.get(index))
+            .map(|tab| &tab.kind),
+        Some(TabKind::Quran { .. })
+    )
+}
+
+/// Load the selected tafsir for the active sura (cached on disk).
+fn ensure_tafsir(state: &mut State) {
+    if !state.show_tafsir {
+        return;
+    }
+    let sura = state
+        .active_tab
+        .and_then(|index| state.tabs.get(index))
+        .and_then(|tab| match &tab.kind {
+            TabKind::Quran { sura, .. } => Some(*sura),
+            _ => None,
+        })
+        .unwrap_or(state.quran_sura);
+    load_tafsir(state, sura);
+}
+
+fn load_tafsir(state: &mut State, sura: i64) {
+    if state.tafsir_for == Some(sura) && !state.tafsir_lines.is_empty() {
+        return;
+    }
+    let tafsirs = shamela_import::tafsir_dl::TAFSIRS;
+    let (slug, name) = tafsirs[state.tafsir_ix % tafsirs.len()];
+    match shamela_import::tafsir_dl::load_cached(&tafsir_cache_dir(), slug, sura) {
+        Ok(lines) => {
+            state.tafsir_lines = lines;
+            state.tafsir_for = Some(sura);
+            state.status = format!("{name}: sura {sura}");
+        }
+        Err(err) => {
+            state.status = format!("tafsir failed: {err}");
+            state.tafsir_lines.clear();
+            state.tafsir_for = Some(sura);
+        }
+    }
+}
+
+/// Commentary linking: show tafsir for Quran, search "sharh" for a book.
+fn sharh_link(state: &mut State) {
+    if quran_active(state) {
+        state.show_tafsir = !state.show_tafsir;
+        if state.show_tafsir {
+            ensure_tafsir(state);
+        }
+        state.status = String::from("tafsir (commentary) toggled");
+        return;
+    }
+    let Some((_, title, _)) = active_text(state) else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    let stem = title.split_whitespace().next().unwrap_or("").to_string();
+    if stem.is_empty() {
+        state.status = String::from("open a book first");
+        return;
+    }
+    state.panel = Panel::Library;
+    state.query = format!("شرح {stem}");
+    run_search(state);
+}
+
+/// Open a page in the system browser (help, releases).
+fn open_external(url: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = url;
+    }
+}
+
+fn text_colors() -> [Color; 4] {
+    [
+        Color::BLACK,
+        Color::from_rgb(0.25, 0.18, 0.10),
+        Color::from_rgb(0.10, 0.18, 0.35),
+        Color::from_rgb(0.42, 0.10, 0.12),
+    ]
+}
+
+fn bg_colors() -> [Color; 4] {
+    [
+        Color::WHITE,
+        Color::from_rgb(0.99, 0.97, 0.90),
+        Color::from_rgb(0.95, 0.91, 0.82),
+        Color::from_rgb(0.92, 0.94, 0.97),
+    ]
+}
+
+fn next_color(list: &[Color], current: Color) -> Color {
+    let index = list.iter().position(|color| *color == current).unwrap_or(0);
+    list[(index + 1) % list.len()]
 }
 
 /// Focus the first open book tab (mirrors "display active book").
@@ -1006,6 +1650,7 @@ fn push_card(state: &mut State, book_id: i64, title: String, body: String) {
         book_id,
         title,
         kind: TabKind::Card(body),
+        db: None,
     });
     state.active_tab = Some(state.tabs.len() - 1);
 }
@@ -1322,6 +1967,34 @@ fn refresh_notes(state: &mut State) {
 }
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
+    let persist = matches!(
+        &message,
+        Message::FontBigger
+            | Message::FontSmaller
+            | Message::ThemeToggle
+            | Message::LangCycle
+            | Message::ToggleTashkeel
+            | Message::ToggleOptHamza
+            | Message::ToggleOptTashkeel
+            | Message::ToggleOptTatweel
+            | Message::AccentNext
+            | Message::ToggleCorners
+            | Message::LineBigger
+            | Message::LineSmaller
+            | Message::ReaderFgNext
+            | Message::ReaderBgNext
+            | Message::ToggleReopenLast
+            | Message::ToggleNotifySearch
+            | Message::ResetAll
+    );
+    let task = apply(state, message);
+    if persist {
+        save_settings(state);
+    }
+    task
+}
+
+fn apply(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::OpenDatabase => open_database(state),
         Message::ImportBok => import_bok(state),
@@ -1373,7 +2046,71 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.dl_id = id;
         }
         Message::DownloadList => refresh_download_list(state),
-        Message::DownloadFile(name) => download_file(state, name),
+        Message::DownloadFile(name) => enqueue_file(state, name),
+        Message::DownloadAll => {
+            let files: Vec<String> = state.dl_files.iter().map(|f| f.name.clone()).collect();
+            for name in files {
+                enqueue_file(state, name);
+            }
+        }
+        Message::DownloadCurrent => download_current(state),
+        Message::DownloadOpen => {
+            state.show_downloads = true;
+        }
+        Message::DlToggle => {
+            state.show_downloads = !state.show_downloads;
+        }
+        Message::DlTick => poll_downloads(state),
+        Message::DlRemove(id) => remove_job(state, id),
+        Message::DlRetry(id) => retry_job(state, id),
+        Message::DlCancel => cancel_all(state),
+        Message::AccentNext => {
+            state.accent = state.accent.next();
+        }
+        Message::ToggleCorners => {
+            state.rounded = !state.rounded;
+        }
+        Message::LineBigger => {
+            state.line_height = (state.line_height + 0.1).min(2.4);
+        }
+        Message::LineSmaller => {
+            state.line_height = (state.line_height - 0.1).max(1.0);
+        }
+        Message::ReaderFgNext => {
+            state.reader_text = next_color(&text_colors(), state.reader_text);
+        }
+        Message::ReaderBgNext => {
+            state.reader_bg = next_color(&bg_colors(), state.reader_bg);
+        }
+        Message::TafsirCycle => {
+            state.tafsir_ix = (state.tafsir_ix + 1) % shamela_import::tafsir_dl::TAFSIRS.len();
+            state.tafsir_for = None;
+            ensure_tafsir(state);
+        }
+        Message::TafsirToggle => {
+            state.show_tafsir = !state.show_tafsir;
+            if state.show_tafsir {
+                ensure_tafsir(state);
+            }
+        }
+        Message::OpenReleases => open_external(RELEASES_URL),
+        Message::OpenHelp => open_external(HELP_URL),
+        Message::SharhLink => sharh_link(state),
+        Message::ToggleReopenLast => {
+            state.reopen_last = !state.reopen_last;
+        }
+        Message::ToggleNotifySearch => {
+            state.notify_search = !state.notify_search;
+        }
+        Message::EscapePressed => {
+            if state.show_settings {
+                state.show_settings = false;
+            } else if state.show_downloads {
+                state.show_downloads = false;
+            } else if let Some(index) = state.active_tab {
+                close_tab(state, index);
+            }
+        }
         Message::FontBigger => {
             state.font_size = (state.font_size + 1.0).min(34.0);
         }
@@ -1474,16 +2211,17 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::ResetAll => {
-            state.font_size = 22.0;
+            state.font_size = 24.0;
             state.theme_kind = AppTheme::Light;
             state.show_tashkeel = true;
+            state.accent = Accent::Royal;
+            state.rounded = true;
+            state.line_height = 1.6;
+            state.reader_text = Color::BLACK;
+            state.reader_bg = Color::WHITE;
             state.search_opts = NormalizeOptions::default();
+            rebuild_index(state);
             state.status = String::from("settings reset");
-        }
-        Message::CloseActiveTab => {
-            if let Some(index) = state.active_tab {
-                close_tab(state, index);
-            }
         }
         Message::OpenImported(name) => {
             use std::collections::hash_map::DefaultHasher;
@@ -1497,7 +2235,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut hasher = DefaultHasher::new();
             name.hash(&mut hasher);
             let book_id = hasher.finish() as i64;
-            open_imported_db(state, &path, title, book_id);
+            open_imported_db(state, &path, title, book_id, None);
         }
         Message::FindPage => {
             let query = state.query.trim().to_string();
@@ -1581,9 +2319,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 _ => String::from("en"),
             };
         }
-        Message::Hint(text) => {
-            state.status = text.to_string();
-        }
     }
     Task::none()
 }
@@ -1603,45 +2338,161 @@ fn item_size(base: f32) -> f32 {
 /// Icon toolbar mirroring the classic Shamela PC button order.
 /// Buttons needing an active book explain so, exactly like the original.
 fn tool_bar(state: &State) -> Element<'_, Message> {
+    let chrome = state.chrome();
     let theme_icon = match state.theme_kind {
         AppTheme::Light => "moon",
         AppTheme::Dark => "sun",
     };
     let row_one = row![
-        tool_btn("selbk", Message::PanelSelected(Panel::Library)),
-        tool_btn("display", Message::FocusBook),
-        tool_btn("tree", Message::ToggleToc),
-        tool_btn("com", Message::ToggleNotes),
-        tool_btn("searchpage", Message::FindPage),
-        tool_btn("searchbok", Message::SearchBook),
-        tool_btn("search", Message::PanelSelected(Panel::Library)),
-        tool_btn("lastsearch", Message::LastSearch),
-        tool_btn("saved", Message::PanelSelected(Panel::Bookmarks)),
-        tool_btn("first", Message::PageFirst),
-        tool_btn("prev", Message::ReaderPrev),
-        tool_btn("next", Message::ReaderNext),
-        tool_btn("last", Message::PageLast),
-        tool_btn("dipquran", Message::PanelSelected(Panel::Quran)),
-        tool_btn("sharh", Message::Hint("sharh linking: roadmap")),
+        tool_btn(
+            "selbk",
+            ("Choose book", "اختيار كتاب"),
+            Message::PanelSelected(Panel::Library),
+            chrome
+        ),
+        tool_btn(
+            "display",
+            ("Display book", "عرض الكتاب"),
+            Message::FocusBook,
+            chrome
+        ),
+        tool_btn(
+            "tree",
+            ("Toggle index", "الفهرس"),
+            Message::ToggleToc,
+            chrome
+        ),
+        tool_btn(
+            "com",
+            ("Toggle notes", "التعليقات"),
+            Message::ToggleNotes,
+            chrome
+        ),
+        tool_btn(
+            "searchpage",
+            ("Find in page", "بحث في الصفحة"),
+            Message::FindPage,
+            chrome
+        ),
+        tool_btn(
+            "searchbok",
+            ("Search this book", "بحث في الكتاب"),
+            Message::SearchBook,
+            chrome
+        ),
+        tool_btn(
+            "search",
+            ("Global search", "بحث عام"),
+            Message::PanelSelected(Panel::Library),
+            chrome
+        ),
+        tool_btn(
+            "lastsearch",
+            ("Last search", "البحث الأخير"),
+            Message::LastSearch,
+            chrome
+        ),
+        tool_btn(
+            "saved",
+            ("Saved", "المحفوظ"),
+            Message::PanelSelected(Panel::Bookmarks),
+            chrome
+        ),
+        tool_btn(
+            "first",
+            ("First page", "أول صفحة"),
+            Message::PageFirst,
+            chrome
+        ),
+        tool_btn("prev", ("Previous", "السابق"), Message::ReaderPrev, chrome),
+        tool_btn("next", ("Next", "التالي"), Message::ReaderNext, chrome),
+        tool_btn("last", ("Last", "الأخير"), Message::PageLast, chrome),
+        tool_btn(
+            "dipquran",
+            ("Quran", "القرآن"),
+            Message::PanelSelected(Panel::Quran),
+            chrome
+        ),
+        tool_btn(
+            "sharh",
+            ("Commentary link", "ربط الشرح"),
+            Message::SharhLink,
+            chrome
+        ),
     ]
     .spacing(2)
     .padding(2);
     let row_two = row![
-        tool_btn("import", Message::ImportBok),
-        tool_btn("ctr", Message::PanelSelected(Panel::Control)),
-        tool_btn("authors", Message::PanelSelected(Panel::Authors)),
-        tool_btn("copy", Message::CopyPage),
-        tool_btn("bkmrk", Message::PanelSelected(Panel::Bookmarks)),
-        tool_btn("export", Message::ExportBook),
-        tool_btn("betaka", Message::OpenCard),
-        tool_btn("upgrade", Message::PanelSelected(Panel::Downloads)),
-        tool_btn("options", Message::ToggleSettings),
-        tool_btn("stop", Message::Hint("no background task")),
-        tool_btn("globe", Message::PanelSelected(Panel::Downloads)),
-        tool_btn(theme_icon, Message::ThemeToggle),
+        tool_btn(
+            "import",
+            ("Import BOK", "استيراد"),
+            Message::ImportBok,
+            chrome
+        ),
+        tool_btn(
+            "ctr",
+            ("Control room", "غرفة التحكم"),
+            Message::PanelSelected(Panel::Control),
+            chrome
+        ),
+        tool_btn(
+            "authors",
+            ("Authors", "المؤلفون"),
+            Message::PanelSelected(Panel::Authors),
+            chrome
+        ),
+        tool_btn(
+            "copy",
+            ("Copy page", "نسخ الصفحة"),
+            Message::CopyPage,
+            chrome
+        ),
+        tool_btn(
+            "bkmrk",
+            ("Bookmark", "إشارة مرجعية"),
+            Message::BookmarkAdd,
+            chrome
+        ),
+        tool_btn("export", ("Export", "تصدير"), Message::ExportBook, chrome),
+        tool_btn(
+            "betaka",
+            ("Book card", "بطاقة الكتاب"),
+            Message::OpenCard,
+            chrome
+        ),
+        tool_btn(
+            "upgrade",
+            ("Live update", "الترقية الحية"),
+            Message::OpenReleases,
+            chrome
+        ),
+        tool_btn(
+            "options",
+            ("Settings", "الإعدادات"),
+            Message::ToggleSettings,
+            chrome
+        ),
+        tool_btn("stop", ("Stop", "إيقاف"), Message::DlCancel, chrome),
+        tool_btn(
+            "globe",
+            ("Downloads", "التحميل"),
+            Message::DownloadOpen,
+            chrome
+        ),
+        tool_btn(
+            theme_icon,
+            ("Theme", "المظهر"),
+            Message::ThemeToggle,
+            chrome
+        ),
         button(ar(state.lang.code(), 14.0)).on_press(Message::LangCycle),
-        tool_btn("help", Message::About),
-        tool_btn("plus", Message::OpenDatabase),
+        tool_btn("help", ("Help", "مساعدة"), Message::OpenHelp, chrome),
+        tool_btn(
+            "plus",
+            ("Open database", "فتح قاعدة"),
+            Message::OpenDatabase,
+            chrome
+        ),
         button(ar("A+", 14.0)).on_press(Message::FontBigger),
         button(ar("A-", 14.0)).on_press(Message::FontSmaller),
     ]
@@ -1663,6 +2514,7 @@ fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message>
                 false,
                 Message::BookOpened(book.id),
                 item_size(state.font_size),
+                state.chrome(),
             )
         })
         .collect();
@@ -1680,6 +2532,7 @@ fn library_tree(state: &State) -> Element<'_, Message> {
             Some(category.id) == state.active_category,
             Message::CategorySelected(category.id),
             item_size(state.font_size),
+            state.chrome(),
         ));
     }
     scrollable(column(items).spacing(4))
@@ -1712,6 +2565,7 @@ fn authors_panel(state: &State) -> Element<'_, Message> {
             Some(author.id) == state.active_author,
             Message::AuthorSelected(author.id),
             item_size(state.font_size),
+            state.chrome(),
         ));
     }
     scrollable(column(items).spacing(4))
@@ -1733,6 +2587,7 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
                     false,
                     Message::BookOpened(mark.id),
                     item_size(state.font_size),
+                    state.chrome(),
                 ),
                 button(ticon("x", 16.0)).on_press(Message::BookmarkRemove(mark.id)),
             ]
@@ -1752,7 +2607,16 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
     let fetch = button(ar(tr(state.lang, "fetch_books"), 14.0))
         .on_press(Message::DownloadList)
         .width(Length::Fill);
-    let mut items: Vec<Element<'_, Message>> = vec![input.into(), fetch.into()];
+    let actions = row![
+        button(ar(tr(state.lang, "download_all"), 14.0))
+            .on_press(Message::DownloadAll)
+            .width(Length::Fill),
+        button(ar(tr(state.lang, "dl_queue"), 14.0))
+            .on_press(Message::DownloadOpen)
+            .width(Length::Fill),
+    ]
+    .spacing(4);
+    let mut items: Vec<Element<'_, Message>> = vec![input.into(), fetch.into(), actions.into()];
     for file in &state.dl_files {
         let megabytes = file.size as f64 / 1_048_576.0;
         let label = format!("{} ({megabytes:.1} MB)", file.name);
@@ -1761,7 +2625,67 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
             false,
             Message::DownloadFile(file.name.clone()),
             item_size(state.font_size),
+            state.chrome(),
         ));
+    }
+    scrollable(column(items).spacing(4))
+        .height(Length::Fill)
+        .into()
+}
+
+/// Books of the picked section (middle sub-panel).
+fn books_panel(state: &State) -> Element<'_, Message> {
+    let mut items: Vec<Element<'_, Message>> =
+        vec![ar(tr(state.lang, "books"), title_size(state.font_size))];
+    if state.books.is_empty() {
+        let hint = if state.query.trim().chars().count() >= MIN_QUERY_CHARS {
+            tr(state.lang, "no_results")
+        } else {
+            tr(state.lang, "pick_section")
+        };
+        items.push(ar(hint, item_size(state.font_size)));
+    }
+    for book in state.books.iter().take(200) {
+        items.push(list_row(
+            book.name.clone(),
+            false,
+            Message::BookOpened(book.id),
+            item_size(state.font_size),
+            state.chrome(),
+        ));
+    }
+    scrollable(column(items).spacing(4))
+        .height(Length::Fill)
+        .into()
+}
+
+/// Control room: imported book files with sizes and deletion.
+fn control_panel(state: &State) -> Element<'_, Message> {
+    let total: u64 = state.control_files.iter().map(|(_, size)| size).sum();
+    let megabytes = total as f64 / 1_048_576.0;
+    let mut items: Vec<Element<'_, Message>> = vec![
+        ar(tr(state.lang, "control_room"), title_size(state.font_size)),
+        ar(
+            format!("{megabytes:.1} MB : {n}", n = state.control_files.len()),
+            item_size(state.font_size),
+        ),
+    ];
+    for (name, size) in &state.control_files {
+        let megabytes = *size as f64 / 1_048_576.0;
+        items.push(
+            row![
+                list_row(
+                    format!("{name} ({megabytes:.1} MB)"),
+                    false,
+                    Message::OpenImported(name.clone()),
+                    item_size(state.font_size),
+                    state.chrome(),
+                ),
+                button(ticon("x", 16.0)).on_press(Message::DeleteBook(name.clone())),
+            ]
+            .spacing(4)
+            .into(),
+        );
     }
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
@@ -1796,6 +2720,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
                     false,
                     Message::QuranSura(verse.sura),
                     item_size(state.font_size),
+                    state.chrome(),
                 )
             })
             .collect();
@@ -1813,7 +2738,13 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
         .map(|(index, name)| {
             let id = index as i64 + 1;
             let label = format!("{id}. {name}");
-            list_row(label, id == state.quran_sura, Message::QuranSura(id), 13.0)
+            list_row(
+                label,
+                id == state.quran_sura,
+                Message::QuranSura(id),
+                13.0,
+                state.chrome(),
+            )
         })
         .collect();
     column![
@@ -1851,7 +2782,7 @@ fn sidebar(state: &State) -> Element<'_, Message> {
     column![search, list]
         .spacing(8)
         .padding(8)
-        .width(Length::Fixed(SIDEBAR_WIDTH))
+        .width(Length::Fill)
         .into()
 }
 
@@ -1893,7 +2824,7 @@ fn active_text(state: &State) -> Option<(i64, String, String)> {
             apply_tashkeel(body, state.show_tashkeel).into_owned(),
         )),
         TabKind::Reader(reader) => {
-            let page = reader.pages.get(reader.index)?;
+            reader.pages.get(reader.index)?;
             let shown = if reader.show_translation {
                 reader
                     .translation
@@ -1985,6 +2916,8 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         text(shown)
             .font(AMIRI)
             .size(font_size)
+            .line_height(LineHeight::Relative(state.line_height))
+            .color(state.reader_text)
             .shaping(Shaping::Advanced)
             .width(Length::Fill),
     )
@@ -2002,7 +2935,11 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
                 .into(),
         );
     }
-    let page_view = column(page_parts).spacing(8).width(Length::Fill);
+    let page_view = container(column(page_parts).spacing(8).width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(6)
+        .style(reader_bg_style(state.reader_bg));
 
     fn flatten<'a>(nodes: &'a [TocNode], depth: usize, out: &mut Vec<(usize, &'a TocNode)>) {
         for node in nodes {
@@ -2032,6 +2969,7 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
                     selected,
                     Message::TocJump(index),
                     (font_size - 4.0).max(12.0),
+                    state.chrome(),
                 ),
                 None => ar(label.as_str(), (font_size - 4.0).max(12.0)),
             }
@@ -2048,6 +2986,7 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
 }
 
 fn reader(state: &State) -> Element<'_, Message> {
+    let chrome = state.chrome();
     let tabs: Vec<Element<'_, Message>> = state
         .tabs
         .iter()
@@ -2072,51 +3011,119 @@ fn reader(state: &State) -> Element<'_, Message> {
                         .get(*sura as usize - 1)
                         .unwrap_or(&"?");
                     let head = format!("{name} ({})", verses.len());
-                    let body_text = render_sura(verses, state.show_tashkeel);
+                    let tafsir_label = shamela_import::tafsir_dl::TAFSIRS
+                        [state.tafsir_ix % shamela_import::tafsir_dl::TAFSIRS.len()]
+                    .1;
+                    let mut body_text = String::new();
+                    for (index, verse) in verses.iter().enumerate() {
+                        let verse_text = apply_tashkeel(&verse.text, state.show_tashkeel);
+                        body_text.push_str(&format!("({}) {verse_text}\n", verse.aya));
+                        if state.show_tafsir {
+                            if let Some(tafsir) = state.tafsir_lines.get(index) {
+                                body_text.push_str(&format!("\n{tafsir}\n"));
+                            }
+                        }
+                        body_text.push('\n');
+                    }
                     column![
-                        row![
-                            tool_btn("bkmrk", Message::BookmarkAdd),
-                            tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
-                        ]
-                        .spacing(8),
                         row![
                             button(ticon("prev", 18.0)).on_press(Message::ReaderPrev),
                             button(ticon("next", 18.0)).on_press(Message::ReaderNext),
+                            button(ar(tafsir_label, 14.0)).on_press(Message::TafsirCycle),
+                            button(ar(tr(state.lang, "tafsir"), 14.0))
+                                .on_press(Message::TafsirToggle)
+                                .style(accent_style(
+                                    if state.show_tafsir {
+                                        chrome.accent
+                                    } else {
+                                        Color::from_rgb(0.55, 0.45, 0.30)
+                                    },
+                                    chrome.radius
+                                )),
+                            tool_btn(
+                                "bkmrk",
+                                ("Bookmark", "إشارة مرجعية"),
+                                Message::BookmarkAdd,
+                                chrome
+                            ),
+                            tool_btn(
+                                "x",
+                                ("Close", "إغلاق"),
+                                Message::TabClosed(state.active_tab.unwrap_or(0)),
+                                chrome
+                            ),
                         ]
-                        .spacing(8),
-                        scrollable(
-                            text(format!("{head}\n\n{body_text}"))
-                                .font(AMIRI)
-                                .size(state.font_size)
-                                .shaping(Shaping::Advanced)
-                                .width(Length::Fill),
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center),
+                        container(
+                            scrollable(
+                                text(format!("{head}\n\n{body_text}"))
+                                    .font(AMIRI)
+                                    .size(state.font_size)
+                                    .line_height(LineHeight::Relative(state.line_height))
+                                    .color(state.reader_text)
+                                    .shaping(Shaping::Advanced)
+                                    .width(Length::Fill),
+                            )
+                            .height(Length::Fill),
                         )
-                        .height(Length::Fill),
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(6)
+                        .style(reader_bg_style(state.reader_bg)),
                     ]
                     .spacing(8)
                     .into()
                 }
                 TabKind::Card(body) => column![
                     row![
-                        tool_btn("bkmrk", Message::BookmarkAdd),
-                        tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
+                        tool_btn(
+                            "bkmrk",
+                            ("Bookmark", "إشارة مرجعية"),
+                            Message::BookmarkAdd,
+                            chrome
+                        ),
+                        tool_btn(
+                            "x",
+                            ("Close", "إغلاق"),
+                            Message::TabClosed(state.active_tab.unwrap_or(0)),
+                            chrome
+                        ),
                     ]
                     .spacing(8),
-                    scrollable(
-                        text(apply_tashkeel(body, state.show_tashkeel).into_owned())
-                            .font(AMIRI)
-                            .size(state.font_size)
-                            .shaping(Shaping::Advanced)
-                            .width(Length::Fill),
+                    container(
+                        scrollable(
+                            text(apply_tashkeel(body, state.show_tashkeel).into_owned())
+                                .font(AMIRI)
+                                .size(state.font_size)
+                                .line_height(LineHeight::Relative(state.line_height))
+                                .color(state.reader_text)
+                                .shaping(Shaping::Advanced)
+                                .width(Length::Fill),
+                        )
+                        .height(Length::Fill),
                     )
-                    .height(Length::Fill),
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(6)
+                    .style(reader_bg_style(state.reader_bg)),
                 ]
                 .spacing(8)
                 .into(),
                 TabKind::Reader(reader_tab) => column![
                     row![
-                        tool_btn("bkmrk", Message::BookmarkAdd),
-                        tool_btn("x", Message::TabClosed(state.active_tab.unwrap_or(0))),
+                        tool_btn(
+                            "bkmrk",
+                            ("Bookmark", "إشارة مرجعية"),
+                            Message::BookmarkAdd,
+                            chrome
+                        ),
+                        tool_btn(
+                            "x",
+                            ("Close", "إغلاق"),
+                            Message::TabClosed(state.active_tab.unwrap_or(0)),
+                            chrome
+                        ),
                     ]
                     .spacing(8),
                     reader_tab_view(state, reader_tab),
@@ -2175,8 +3182,76 @@ fn status_bar(state: &State) -> Element<'_, Message> {
     .into()
 }
 
+/// Reading-page background style.
+fn reader_bg_style(bg: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_: &Theme| container::Style {
+        background: Some(Background::Color(bg)),
+        ..container::Style::default()
+    }
+}
+
+/// Dimmed backdrop with a centered card (popup window look).
+fn modal_shell<'a>(card: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(column![
+        Space::with_height(Length::Fill),
+        row![
+            Space::with_width(Length::Fill),
+            card.into(),
+            Space::with_width(Length::Fill),
+        ],
+        Space::with_height(Length::Fill),
+    ])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// Card background for popups (follows the light/dark theme).
+fn popup_card_style(dark: bool) -> impl Fn(&Theme) -> container::Style {
+    let bg = if dark {
+        Color::from_rgb(0.16, 0.16, 0.20)
+    } else {
+        Color::from_rgb(0.99, 0.99, 0.98)
+    };
+    let fg = if dark {
+        Color::from_rgb(0.93, 0.93, 0.96)
+    } else {
+        Color::from_rgb(0.10, 0.10, 0.12)
+    };
+    move |_: &Theme| container::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Some(fg),
+        border: iced::border::Border {
+            color: Color::from_rgb(0.55, 0.55, 0.60),
+            width: 1.0,
+            radius: iced::border::Radius::new(10.0),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Settings popup: every option works (display, search, data).
 fn settings_modal(state: &State) -> Element<'_, Message> {
+    let dark = matches!(state.theme_kind, AppTheme::Dark);
+    let swatch = |color: Color| -> Element<'static, Message> {
+        container(Space::with_width(Length::Fixed(0.0)))
+            .width(Length::Fixed(20.0))
+            .height(Length::Fixed(20.0))
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(color)),
+                border: iced::border::Border {
+                    color: Color::from_rgb(0.4, 0.4, 0.4),
+                    width: 1.0,
+                    radius: iced::border::Radius::new(3.0),
+                },
+                ..container::Style::default()
+            })
+            .into()
+    };
     let title = row![
         ticon("options", 22.0),
         ar(tr(state.lang, "settings"), 18.0),
@@ -2197,16 +3272,54 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
         ))
         .on_press(Message::ThemeToggle),
         button(ar(state.lang.code(), 14.0)).on_press(Message::LangCycle),
+        button(ar(
+            format!("{}: {}", tr(state.lang, "accent"), state.accent.name()),
+            14.0
+        ))
+        .on_press(Message::AccentNext),
     ]
-    .spacing(8);
-    let card = column![
+    .spacing(6);
+    let line_row = row![
+        ar(tr(state.lang, "line_height"), 14.0),
+        button(ar("-", 14.0)).on_press(Message::LineSmaller),
+        ar(format!("{:.1}", state.line_height), 14.0),
+        button(ar("+", 14.0)).on_press(Message::LineBigger),
+    ]
+    .spacing(6);
+    let color_row = row![
+        ar(tr(state.lang, "text_color"), 14.0),
+        swatch(state.reader_text),
+        button(ar(">", 13.0)).on_press(Message::ReaderFgNext),
+        ar(tr(state.lang, "page_color"), 14.0),
+        swatch(state.reader_bg),
+        button(ar(">", 13.0)).on_press(Message::ReaderBgNext),
+    ]
+    .spacing(6);
+    let body = column![
         title,
         ar(tr(state.lang, "display"), 16.0),
         font_row,
+        line_row,
+        color_row,
+        toggle_row(
+            tr(state.lang, "corners").to_string(),
+            state.rounded,
+            Message::ToggleCorners
+        ),
         toggle_row(
             tr(state.lang, "show_tashkeel").to_string(),
             state.show_tashkeel,
             Message::ToggleTashkeel
+        ),
+        toggle_row(
+            tr(state.lang, "reopen_last").to_string(),
+            state.reopen_last,
+            Message::ToggleReopenLast
+        ),
+        toggle_row(
+            tr(state.lang, "notify_search").to_string(),
+            state.notify_search,
+            Message::ToggleNotifySearch
         ),
         ar(tr(state.lang, "search_options"), 16.0),
         toggle_row(
@@ -2225,39 +3338,142 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
             Message::ToggleOptTatweel
         ),
         ar(tr(state.lang, "data_section"), 16.0),
-        button(ar(tr(state.lang, "clear_cache"), 14.0))
-            .on_press(Message::ClearCache)
-            .width(Length::Fill),
-        button(ar(tr(state.lang, "reset_all"), 14.0))
-            .on_press(Message::ResetAll)
-            .width(Length::Fill),
+        row![
+            button(ar(tr(state.lang, "clear_cache"), 14.0))
+                .on_press(Message::ClearCache)
+                .width(Length::Fill),
+            button(ar(tr(state.lang, "reset_all"), 14.0))
+                .on_press(Message::ResetAll)
+                .width(Length::Fill),
+        ]
+        .spacing(6),
+        row![
+            button(ar(tr(state.lang, "download_current"), 14.0))
+                .on_press(Message::DownloadCurrent)
+                .width(Length::Fill),
+            button(ar(tr(state.lang, "about"), 14.0))
+                .on_press(Message::About)
+                .width(Length::Fill),
+        ]
+        .spacing(6),
     ]
     .spacing(8)
     .padding(4)
-    .width(Length::Fixed(430.0));
-    let boxed = container(card)
+    .width(Length::Fixed(470.0));
+    let card = container(scrollable(body).height(Length::Fixed(470.0)))
         .padding(18)
-        .width(Length::Fixed(466.0))
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 1.0))),
-            ..container::Style::default()
-        });
-    container(column![
-        Space::with_height(Length::Fill),
-        row![
-            Space::with_width(Length::Fill),
-            boxed,
-            Space::with_width(Length::Fill),
-        ],
-        Space::with_height(Length::Fill),
-    ])
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-        ..container::Style::default()
-    })
-    .into()
+        .width(Length::Fixed(510.0))
+        .style(popup_card_style(dark));
+    modal_shell(card)
+}
+
+/// Download manager popup: queue, progress, per-job controls.
+fn downloads_modal(state: &State) -> Element<'_, Message> {
+    let dark = matches!(state.theme_kind, AppTheme::Dark);
+    let title = row![
+        ticon("globe", 22.0),
+        ar(tr(state.lang, "downloads"), 18.0),
+        Space::with_width(Length::Fill),
+        button(ticon("x", 18.0)).on_press(Message::DlToggle),
+    ]
+    .spacing(8);
+    let controls = row![
+        button(ar(tr(state.lang, "download_all"), 14.0)).on_press(Message::DownloadAll),
+        button(ar(tr(state.lang, "download_current"), 14.0)).on_press(Message::DownloadCurrent),
+        button(ar(tr(state.lang, "fetch_books"), 14.0)).on_press(Message::DownloadList),
+        button(ar(tr(state.lang, "cancel"), 14.0)).on_press(Message::DlCancel),
+    ]
+    .spacing(6);
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    if state.dl_queue.is_empty() {
+        rows.push(ar(tr(state.lang, "no_downloads"), 15.0));
+    }
+    for job in &state.dl_queue {
+        let status = if let Some(err) = &job.failed {
+            format!("failed: {err}")
+        } else if job.done {
+            String::from("done")
+        } else {
+            job.progress.status()
+        };
+        let mut actions: Vec<Element<'_, Message>> = Vec::new();
+        if job.failed.is_some() {
+            actions.push(
+                button(ar(tr(state.lang, "retry"), 13.0))
+                    .on_press(Message::DlRetry(job.id))
+                    .into(),
+            );
+            actions.push(
+                button(ar(tr(state.lang, "remove"), 13.0))
+                    .on_press(Message::DlRemove(job.id))
+                    .into(),
+            );
+        } else if job.done {
+            actions.push(
+                button(ar(tr(state.lang, "remove"), 13.0))
+                    .on_press(Message::DlRemove(job.id))
+                    .into(),
+            );
+        } else {
+            actions.push(
+                button(ar(tr(state.lang, "cancel"), 13.0))
+                    .on_press(Message::DlCancel)
+                    .into(),
+            );
+        }
+        rows.push(
+            column![
+                row![
+                    ar(job.label.clone(), 15.0),
+                    Space::with_width(Length::Fill),
+                    ar(status, 13.0),
+                ]
+                .spacing(6),
+                progress_bar(0.0..=1.0, job.progress.fraction()).height(10.0),
+                row(actions).spacing(4),
+            ]
+            .spacing(4)
+            .into(),
+        );
+    }
+    let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(220.0));
+    let mut files: Vec<Element<'_, Message>> = Vec::new();
+    for file in state.dl_files.iter().take(40) {
+        let megabytes = file.size as f64 / 1_048_576.0;
+        let label = format!("{} ({megabytes:.1} MB)", file.name);
+        files.push(
+            row![
+                ar(label, 13.0),
+                Space::with_width(Length::Fill),
+                button(ar(tr(state.lang, "downloads"), 12.0))
+                    .on_press(Message::DownloadFile(file.name.clone())),
+            ]
+            .spacing(4)
+            .into(),
+        );
+    }
+    let item_section: Element<'_, Message> = if files.is_empty() {
+        Space::with_height(Length::Fixed(0.0)).into()
+    } else {
+        column![
+            ar(
+                format!("{}: {}", tr(state.lang, "downloads"), state.dl_id),
+                14.0
+            ),
+            scrollable(column(files).spacing(4)).height(Length::Fixed(120.0)),
+        ]
+        .spacing(4)
+        .into()
+    };
+    let body = column![title, controls, list, item_section]
+        .spacing(10)
+        .padding(4)
+        .width(Length::Fixed(560.0));
+    let card = container(body)
+        .padding(18)
+        .width(Length::Fixed(600.0))
+        .style(popup_card_style(dark));
+    modal_shell(card)
 }
 
 /// Toggle row with ASCII state box (always renders) plus label.
@@ -2279,10 +3495,22 @@ fn hotkey(key: keyboard::Key, _mods: keyboard::Modifiers) -> Option<Message> {
         keyboard::Key::Named(Named::F5) => Some(Message::ReaderNext),
         keyboard::Key::Named(Named::F6) => Some(Message::ReaderPrev),
         keyboard::Key::Named(Named::F3) => Some(Message::PanelSelected(Panel::Library)),
-        keyboard::Key::Named(Named::F10) => Some(Message::ImportBok),
-        keyboard::Key::Named(Named::Escape) => Some(Message::CloseActiveTab),
+        keyboard::Key::Named(Named::F1) => Some(Message::OpenHelp),
+        keyboard::Key::Named(Named::F10) => Some(Message::ToggleSettings),
+        keyboard::Key::Named(Named::Escape) => Some(Message::EscapePressed),
         _ => None,
     }
+}
+
+/// Keyboard shortcuts + a 400 ms download poll while jobs are active.
+fn subscribe(state: &State) -> iced::Subscription<Message> {
+    let keys = keyboard::on_key_press(hotkey);
+    let tick = if dl_active(state) {
+        iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::DlTick)
+    } else {
+        iced::Subscription::none()
+    };
+    iced::Subscription::batch([keys, tick])
 }
 
 fn view(state: &State) -> Element<'_, Message> {
@@ -2294,7 +3522,13 @@ fn view(state: &State) -> Element<'_, Message> {
             pane_grid::Content::new(match content {
                 PaneKind::Reader => reader(state),
                 PaneKind::Books => books_panel(state),
-                PaneKind::Side => sidebar(state),
+                PaneKind::Side => {
+                    if quran_active(state) {
+                        quran_panel(state)
+                    } else {
+                        sidebar(state)
+                    }
+                }
             })
         })
         .spacing(6)
@@ -2303,16 +3537,17 @@ fn view(state: &State) -> Element<'_, Message> {
         .into()
     };
     let content = column![top, body, status_bar(state)];
-    if state.show_settings {
-        Stack::new()
-            .push(content)
-            .push(settings_modal(state))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    } else {
-        content.into()
+    if !state.show_settings && !state.show_downloads {
+        return content.into();
     }
+    let mut stack = Stack::new().push(content);
+    if state.show_settings {
+        stack = stack.push(settings_modal(state));
+    }
+    if state.show_downloads {
+        stack = stack.push(downloads_modal(state));
+    }
+    stack.width(Length::Fill).height(Length::Fill).into()
 }
 
 fn theme(state: &State) -> Theme {
@@ -2328,7 +3563,7 @@ fn main() -> iced::Result {
         std::process::exit(self_test(&args[2], &args[3]));
     }
     iced::application("ShamelaCraft", update, view)
-        .subscription(|_| iced::keyboard::on_key_press(hotkey))
+        .subscription(subscribe)
         .theme(theme)
         .font(include_bytes!("../assets/fonts/Amiri-Regular.ttf"))
         .run()

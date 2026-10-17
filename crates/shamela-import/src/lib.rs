@@ -15,8 +15,10 @@
 pub mod archive;
 pub mod bok;
 pub mod convert;
+pub mod download;
 pub mod extract;
 pub mod quran_dl;
+pub mod tafsir_dl;
 pub mod translate;
 
 use std::fmt::{Display, Formatter};

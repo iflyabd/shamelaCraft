@@ -7,3 +7,10 @@ members = [
     "crates/shamela-import",
     "crates/shamelacraft",
 ]
+# Vendored iced_widget 0.13.4 with one clean-room patch: vertical
+# scrollbars are placed on the LEFT edge (RTL reading interface),
+# as the stock widget hardcodes them on the right.
+exclude = ["vendor/iced_widget"]
+
+[patch.crates-io]
+iced_widget = { path = "vendor/iced_widget" }

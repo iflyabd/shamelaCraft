@@ -10,7 +10,7 @@ name = "shamelacraft"
 path = "src/main.rs"
 
 [dependencies]
-iced = { version = "0.13", features = ["svg"] }
+iced = { version = "0.13", features = ["svg", "smol"] }
 rfd = "0.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 shamela-db = { path = "../shamela-db" }
