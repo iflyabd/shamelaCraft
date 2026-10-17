@@ -3295,10 +3295,28 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
         ))
         .on_press(Message::ThemeToggle),
         button(ar(state.lang.code(), 14.0)).on_press(Message::LangCycle),
-        button(ar(
-            format!("{}: {}", tr(state.lang, "accent"), state.accent.name()),
-            14.0
-        ))
+        button(
+            row![
+                container(Space::with_width(Length::Fixed(0.0)))
+                    .width(Length::Fixed(14.0))
+                    .height(Length::Fixed(14.0))
+                    .style({
+                        let accent = state.accent.color();
+                        move |_: &Theme| container::Style {
+                            background: Some(Background::Color(accent)),
+                            border: iced::border::Border {
+                                color: Color::from_rgb(0.4, 0.4, 0.4),
+                                width: 1.0,
+                                radius: iced::border::Radius::new(3.0),
+                            },
+                            ..container::Style::default()
+                        }
+                    }),
+                ar(state.accent.name(), 14.0),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
         .on_press(Message::AccentNext),
     ]
     .spacing(6);
@@ -3479,10 +3497,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         Space::with_height(Length::Fixed(0.0)).into()
     } else {
         column![
-            ar(
-                format!("{}: {}", tr(state.lang, "downloads"), state.dl_id),
-                14.0
-            ),
+            ar(format!("archive.org: {}", state.dl_id), 14.0),
             scrollable(column(files).spacing(4)).height(Length::Fixed(120.0)),
         ]
         .spacing(4)
@@ -3502,12 +3517,20 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
 /// Toggle row with ASCII state box (always renders) plus label.
 fn toggle_row(label: String, on: bool, msg: Message) -> Element<'static, Message> {
     let mark = if on { "[x]" } else { "[ ]" };
-    button(ar(format!("{mark} {label}"), 15.0))
-        .on_press(msg)
-        .style(button::text)
-        .width(Length::Fill)
-        .padding(6)
-        .into()
+    button(
+        row![
+            Space::with_width(Length::Fill),
+            ar(label, 15.0),
+            ar(mark, 15.0),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(msg)
+    .style(button::text)
+    .width(Length::Fill)
+    .padding(6)
+    .into()
 }
 
 /// Global hotkeys mirroring the classic program (F5/F6 pages, F3 search,
@@ -3574,10 +3597,13 @@ fn view(state: &State) -> Element<'_, Message> {
 }
 
 fn theme(state: &State) -> Theme {
-    match state.theme_kind {
+    let base = match state.theme_kind {
         AppTheme::Light => Theme::Light,
         AppTheme::Dark => Theme::Dark,
-    }
+    };
+    let mut palette = base.palette();
+    palette.primary = state.accent.color();
+    Theme::custom(String::from("ShamelaCraft"), palette)
 }
 
 fn main() -> iced::Result {
