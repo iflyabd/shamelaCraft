@@ -2352,66 +2352,66 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
         AppTheme::Light => "moon",
         AppTheme::Dark => "sun",
     };
-    let row_one = row![
+    let mut row_one_items: Vec<Element<'_, Message>> = vec![
         tool_btn(
             "selbk",
             ("Choose book", "اختيار كتاب"),
             Message::PanelSelected(Panel::Library),
-            chrome
+            chrome,
         ),
         tool_btn(
             "display",
             ("Display book", "عرض الكتاب"),
             Message::FocusBook,
-            chrome
+            chrome,
         ),
         tool_btn(
             "tree",
             ("Toggle index", "الفهرس"),
             Message::ToggleToc,
-            chrome
+            chrome,
         ),
         tool_btn(
             "com",
             ("Toggle notes", "التعليقات"),
             Message::ToggleNotes,
-            chrome
+            chrome,
         ),
         tool_btn(
             "searchpage",
             ("Find in page", "بحث في الصفحة"),
             Message::FindPage,
-            chrome
+            chrome,
         ),
         tool_btn(
             "searchbok",
             ("Search this book", "بحث في الكتاب"),
             Message::SearchBook,
-            chrome
+            chrome,
         ),
         tool_btn(
             "search",
             ("Global search", "بحث عام"),
             Message::PanelSelected(Panel::Library),
-            chrome
+            chrome,
         ),
         tool_btn(
             "lastsearch",
             ("Last search", "البحث الأخير"),
             Message::LastSearch,
-            chrome
+            chrome,
         ),
         tool_btn(
             "saved",
             ("Saved", "المحفوظ"),
             Message::PanelSelected(Panel::Bookmarks),
-            chrome
+            chrome,
         ),
         tool_btn(
             "first",
             ("First page", "أول صفحة"),
             Message::PageFirst,
-            chrome
+            chrome,
         ),
         tool_btn("prev", ("Previous", "السابق"), Message::ReaderPrev, chrome),
         tool_btn("next", ("Next", "التالي"), Message::ReaderNext, chrome),
@@ -2420,93 +2420,97 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
             "dipquran",
             ("Quran", "القرآن"),
             Message::PanelSelected(Panel::Quran),
-            chrome
+            chrome,
         ),
         tool_btn(
             "sharh",
             ("Commentary link", "ربط الشرح"),
             Message::SharhLink,
-            chrome
+            chrome,
         ),
-    ]
-    .spacing(2)
-    .padding(2);
-    let row_two = row![
+    ];
+    row_one_items.reverse();
+    row_one_items.insert(0, Space::with_width(Length::Fill).into());
+    let row_one = row(row_one_items).spacing(2).padding(2);
+    let mut row_two_items: Vec<Element<'_, Message>> = vec![
         tool_btn(
             "import",
             ("Import BOK", "استيراد"),
             Message::ImportBok,
-            chrome
+            chrome,
         ),
         tool_btn(
             "ctr",
             ("Control room", "غرفة التحكم"),
             Message::PanelSelected(Panel::Control),
-            chrome
+            chrome,
         ),
         tool_btn(
             "authors",
             ("Authors", "المؤلفون"),
             Message::PanelSelected(Panel::Authors),
-            chrome
+            chrome,
         ),
         tool_btn(
             "copy",
             ("Copy page", "نسخ الصفحة"),
             Message::CopyPage,
-            chrome
+            chrome,
         ),
         tool_btn(
             "bkmrk",
             ("Bookmark", "إشارة مرجعية"),
             Message::BookmarkAdd,
-            chrome
+            chrome,
         ),
         tool_btn("export", ("Export", "تصدير"), Message::ExportBook, chrome),
         tool_btn(
             "betaka",
             ("Book card", "بطاقة الكتاب"),
             Message::OpenCard,
-            chrome
+            chrome,
         ),
         tool_btn(
             "upgrade",
             ("Live update", "الترقية الحية"),
             Message::OpenReleases,
-            chrome
+            chrome,
         ),
         tool_btn(
             "options",
             ("Settings", "الإعدادات"),
             Message::ToggleSettings,
-            chrome
+            chrome,
         ),
         tool_btn("stop", ("Stop", "إيقاف"), Message::DlCancel, chrome),
         tool_btn(
             "globe",
             ("Downloads", "التحميل"),
             Message::DownloadOpen,
-            chrome
+            chrome,
         ),
         tool_btn(
             theme_icon,
             ("Theme", "المظهر"),
             Message::ThemeToggle,
-            chrome
+            chrome,
         ),
-        button(ar(state.lang.code(), 14.0)).on_press(Message::LangCycle),
+        button(ar(state.lang.code(), 14.0))
+            .on_press(Message::LangCycle)
+            .into(),
         tool_btn("help", ("Help", "مساعدة"), Message::OpenHelp, chrome),
         tool_btn(
             "plus",
             ("Open database", "فتح قاعدة"),
             Message::OpenDatabase,
-            chrome
+            chrome,
         ),
-        button(ar("A+", 14.0)).on_press(Message::FontBigger),
-        button(ar("A-", 14.0)).on_press(Message::FontSmaller),
-    ]
-    .spacing(2)
-    .padding(2);
+        button(ar("A+", 14.0)).on_press(Message::FontBigger).into(),
+        button(ar("A-", 14.0)).on_press(Message::FontSmaller).into(),
+    ];
+    row_two_items.reverse();
+    row_two_items.insert(0, Space::with_width(Length::Fill).into());
+    let row_two = row(row_two_items).spacing(2).padding(2);
     column![row_one, row_two].into()
 }
 
@@ -3017,7 +3021,11 @@ fn reader(state: &State) -> Element<'_, Message> {
             .into()
         })
         .collect();
-    let tab_bar = row(tabs).spacing(4);
+    let mut tabs = tabs;
+    tabs.reverse();
+    let mut tab_children: Vec<Element<'_, Message>> = vec![Space::with_width(Length::Fill).into()];
+    tab_children.extend(tabs);
+    let tab_bar = row(tab_children).spacing(4);
     let content: Element<'_, Message> =
         match state.active_tab.and_then(|index| state.tabs.get(index)) {
             Some(tab) => match &tab.kind {
@@ -3578,6 +3586,7 @@ fn main() -> iced::Result {
         std::process::exit(self_test(&args[2], &args[3]));
     }
     iced::application("ShamelaCraft", update, view)
+        .window_size((1400.0, 900.0))
         .subscription(subscribe)
         .theme(theme)
         .font(include_bytes!("../assets/fonts/Amiri-Regular.ttf"))
