@@ -7,7 +7,7 @@ Lightweight, open-source Arabic library reader in pure Rust.
 > Shamela-4 `master.db` SQLite catalog that already lives on the user's own
 > machine. No affiliation with shamela.ws.
 
-## Features (v0.1)
+## Features (v0.2)
 
 - Open a Shamela-4 `master.db` (read-only, never modified)
 - Browse the 40+ category tree with catalog-ordered books
@@ -16,11 +16,18 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - Tabbed catalog cards (title, authors, death dates, print status)
 - Legacy `.bok` import (pure-Rust Jet/MDB reader) into local `Page`/`Title`
   databases, with full-text reader tabs, page navigation, and TOC jumping
-- Keyless acquisition from public archive.org Shamela collections, with an
-  in-app downloads panel (list `.bok` files, one-click download + import)
-- Persistent bookmarks (`~/.shamelacraft/bookmarks.db`)
-- RTL-first layout, bundled Amiri font (SIL OFL), light/dark themes,
-  adjustable font size
+- **Download manager**: keyless archive.org packs, per-file / per-pack /
+  whole-item / open-book re-download, live progress, cancel, retry, remove
+- **One unified reading pane** for imported books and the Uthmani Quran
+- **Quran tab** with the sura index replacing the library tree, plus nine
+  keyless Arabic tafsirs cached locally
+- **Settings popup** with every option persisted: font size, line spacing,
+  text/background colors, accent color, rounded corners, light/dark theme,
+  diacritics, search normalization, startup behavior
+- Persistent bookmarks (`~/.shamelacraft/bookmarks.db`) and page notes
+- Toolbar tooltips on every button, bilingual labels, keyboard shortcuts
+- RTL-first layout, vertical scrollbars on the **left**, bundled Amiri font,
+  resizable reader / book-list / side panels
 - Trilingual interface (Arabic / English / French) with one-key switch
 - Page translation (free MyMemory API, chunked + locally cached)
 - Native builds for x86-64 **and ARM64** Linux — no emulation needed
@@ -38,9 +45,10 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - [ ] Content acquisition guide (official per-book downloads need an API key: mail@shamela.ws)
 - [ ] Optional: Lucene stored-fields reader for offline desktop data
 - [ ] Advanced search: exact phrase, AND/OR, footnotes scope, per-book scope
+- [x] Notes, bookmarks, markdown export
+- [x] Quran in the unified reading pane with keyless tafsirs
 - [ ] Sharh↔Matn linked scrolling, side-by-side tabs
-- [ ] Notes, highlights, reading history, export
-- [ ] Windows / macOS / Android packaging
+- [ ] Android packaging (Windows/macOS release builds are wired in CI)
 - [ ] Signed releases with checksums
 
 ## Build
@@ -81,7 +89,19 @@ Access/Jet via `jetdb`), TLS via rustls. The same code builds on every OS
 and CPU architecture without emulation. (Dependency honesty: the only
 compiled C in the tree is the vendored SQLite amalgamation and tantivy's
 zstd — everything authored for this project, and every format reader, is
-Rust.)
+Rust. `iced_widget` 0.13.4 is vendored under `vendor/iced_widget` with a
+three-line MIT-licensed patch that puts vertical scrollbars on the left for
+the RTL interface; it is pure Rust.)
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| F5 / F6 | next / previous page (books and Quran suras) |
+| F3 | library and search panel |
+| F1 | online help |
+| F10 | settings popup |
+| Esc | close popup, else close the active tab |
 
 ## Getting books
 
@@ -114,7 +134,9 @@ tolerant Arabic search.
 crates/shamela-db      read-only master.db access (rusqlite)
 crates/shamela-index   Arabic normalization + tantivy index
 crates/shamela-content book .db reader, S1/S2 decoder, HTML pipeline, roots lookup
-crates/shamelacraft    iced GUI binary + bookmarks store
+crates/shamela-import  BOK/archive import, keyless downloads, Quran + tafsir fetchers
+crates/shamelacraft    iced GUI binary, settings, bookmarks and notes stores
+vendor/iced_widget     iced 0.13.4 with the left-scrollbar patch (MIT)
 ```
 
 ## Knowledge & attribution
@@ -158,11 +180,17 @@ MIT — see [LICENSE-MIT](LICENSE-MIT).
 
 - الفكرة: **عبد القادر الجزائري** — المعروف بـ **صقر قريش (Arab Falcon)**
 
-### المزايا (الإصدار ٠٫١)
+### المزايا (الإصدار ٠٫٢)
 
 - فتح `master.db` للقراءة فقط دون أي تعديل
 - تصفح شجرة الأقسام والكتب بالترتيب الأصلي
 - بحث عربي متسامح (يتجاهل التشكيل والهمز والتطويل) في العناوين والمؤلفين
-- تبويبات لبطاقات الكتب، مفضلة محفوظة، مظهران فاتح/داكن، تكبير الخط
-- واجهة عربية من اليمين لليسار مع خط أميري مضمّن
-- نسخ أصلية للينكس x86-64 وARM64 — بلا محاكاة
+- مدير تحميلات: حزم archive.org بلا مفاتيح، تحميل ملف أو حزمة أو الكتاب
+  المفتوح، تقدم حي، إلغاء وإعادة ومتابعة قائمة الانتظار
+- نافذة قراءة موحدة للكتب والقرآن الكريم، وفهرس السور محل شجرة المكتبة
+- تبويب للقرآن مع تسعة تفاسير عربية تُحفظ محليا
+- إعدادات محفوظة: حجم الخط، تباعد الأسطر، ألوان النص والخلفية، لون
+  الواجهة، استدارة الأزرار، المظهر، التشكيل، خيارات البحث
+- تلميحات على أزرار الشريط، اختصارات لوحة مفاتيح، واجهة ثلاثية اللغات
+- أشرطة تمرير على اليسار، ولوحات قابلة للتحجيم
+- خط أميري مضمّن، نسخ أصلية للينكس x86-64 وARM64 — بلا محاكاة

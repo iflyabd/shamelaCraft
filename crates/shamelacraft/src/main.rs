@@ -40,32 +40,41 @@ const MIN_QUERY_CHARS: usize = 2;
 fn about_text(lang: Lang) -> &'static str {
     match lang {
         Lang::Ar => {
-            "v0.1 ShamelaCraft - lightweight Arabic library reader\n\n\
-    - master.db read-only catalog (categories, books, authors)\n\
-    - legacy BOK import, pure-Rust Jet reader\n\
-    - archive.org keyless downloads (bok, zip, tar, rar)\n\
-    - tolerant Arabic search (tashkeel, hamza, tatweel)\n\
-    - tabs, bookmarks, themes, export to markdown\n\n\
-    - idea: Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
-    - clean-room Rust, no proprietary code or assets"
+            "v0.2 ShamelaCraft - قارئ المكتبة العربية الخفيف\n\n\
+    - فهرس master.db للقراءة فقط (تصنيفات، كتب، مؤلفون)\n\
+    - استيراد BOK القديم بقارئ Jet خالص بلغة Rust\n\
+    - تحميل من archive.org بلا مفاتيح (bok, zip, tar, rar)\n\
+    - مدير تحميلات: قائمة انتظار، تقدم، إلغاء وإعادة\n\
+    - بحث عربي متسامح (تشكيل، همزة، تطويل)\n\
+    - تبويبات، إشارات مرجعية، ملاحظات، تصدير Markdown\n\
+    - قرآن عثماني في نافذة القراءة + تسعة تفاسير\n\
+    - إعدادات محفوظة: خط، ألوان، تباعد، سمة، خيارات البحث\n\n\
+    - الفكرة: عبد القادر الجزائري (الصقر القرشي)\n\
+    - Rust نظيف، بلا كود أو أصول مملوكة"
         }
         Lang::En => {
-            "v0.1 ShamelaCraft - lightweight Arabic library reader\n\n\
+            "v0.2 ShamelaCraft - lightweight Arabic library reader\n\n\
     - master.db read-only catalog (categories, books, authors)\n\
     - legacy BOK import, pure-Rust Jet reader\n\
     - archive.org keyless downloads (bok, zip, tar, rar)\n\
+    - download manager: queue, progress, cancel, retry\n\
     - tolerant Arabic search (tashkeel, hamza, tatweel)\n\
-    - tabs, bookmarks, themes, export to markdown\n\n\
+    - tabs, bookmarks, notes, markdown export\n\
+    - Uthmani Quran in the reading pane + nine tafsirs\n\
+    - persistent settings: font, colors, spacing, theme, search\n\n\
     - idea: Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
     - clean-room Rust, no proprietary code or assets"
         }
         Lang::Fr => {
-            "v0.1 ShamelaCraft - lecteur arabe leger de bibliotheque\n\n\
+            "v0.2 ShamelaCraft - lecteur arabe leger de bibliotheque\n\n\
     - catalogue master.db en lecture seule\n\
     - import BOK patrimonial, lecteur Jet 100% Rust\n\
     - telechargements archive.org sans cle\n\
+    - gestionnaire: file d'attente, progression, annulation\n\
     - recherche arabe tolerante\n\
-    - onglets, favoris, themes, export markdown\n\n\
+    - onglets, favoris, notes, export markdown\n\
+    - Coran uthmani dans la zone de lecture + neuf tafsirs\n\
+    - reglages persistants: police, couleurs, interligne, theme\n\n\
     - idee : Abdelkader El Djazairi (Arab Falcon / Saqr Quraish)\n\
     - Rust salle blanche, sans code proprietaire"
         }
@@ -2991,12 +3000,18 @@ fn reader(state: &State) -> Element<'_, Message> {
         .tabs
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            let label = format!("#{num}", num = index + 1);
+        .map(|(index, tab)| {
+            let label: String = tab.title.chars().take(20).collect();
+            let active = state.active_tab == Some(index);
+            let tab_button = button(ar(label, 13.0)).on_press(Message::TabSelected(index));
+            let tab_button = if active {
+                tab_button.style(accent_style(chrome.accent, chrome.radius))
+            } else {
+                tab_button.style(button::text)
+            };
             row![
-                button(ticon("display", 14.0)).on_press(Message::TabSelected(index)),
-                button(ar(label.as_str(), 13.0)).on_press(Message::TabSelected(index)),
-                button(ticon("x", 14.0)).on_press(Message::TabClosed(index)),
+                tab_button,
+                button(ticon("x", 13.0)).on_press(Message::TabClosed(index)),
             ]
             .spacing(2)
             .into()
