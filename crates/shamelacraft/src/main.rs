@@ -1421,6 +1421,38 @@ fn parse_item_id(raw: &str) -> String {
     text.trim_end_matches('/').to_string()
 }
 
+/// One hex digit of a `%XX` escape.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode `%XX` escapes (recorded source URLs keep them, local file names
+/// must not).
+fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+            {
+                out.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Loose name key for matching book titles and file names (drops tashkeel,
 /// tatweel and everything that is not a letter or digit).
 fn match_key(content: &str) -> String {
@@ -1524,7 +1556,10 @@ fn download_current(state: &mut State) {
         if let Ok(url) = std::fs::read_to_string(books_dir().join(format!("{stem}.db.url"))) {
             let url = url.trim().to_string();
             if !url.is_empty() {
-                let file_name = url.rsplit('/').next().unwrap_or("book.bok").to_string();
+                let mut file_name = percent_decode(url.rsplit('/').next().unwrap_or(""));
+                if file_name.is_empty() {
+                    file_name = format!("{stem}.bok");
+                }
                 let dest = downloads_dir().join(&file_name);
                 let after = after_kind(&file_name);
                 enqueue(state, file_name.clone(), url, dest, after);
