@@ -2927,7 +2927,7 @@ fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message>
     if books.is_empty() {
         return ar(tr(state.lang, "no_results"), state.font_size);
     }
-    let items: Vec<Element<'static, Message>> = books
+    let items: Vec<Element<'a, Message>> = books
         .iter()
         .take(200)
         .map(|book| book_row(state, book))
