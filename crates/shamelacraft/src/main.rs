@@ -290,7 +290,6 @@ enum Message {
     OpenImported(String),
     FindPage,
     MenuToggle(usize),
-    MenuClose,
     QuitApp,
     GoToToggle,
     GoToClose,
@@ -2264,7 +2263,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn apply(state: &mut State, message: Message) -> Task<Message> {
-    if !matches!(&message, Message::MenuToggle(_) | Message::MenuClose) {
+    if !matches!(&message, Message::MenuToggle(_)) {
         state.menu_open = None;
     }
     match message {
@@ -2586,7 +2585,6 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
                 Some(index)
             };
         }
-        Message::MenuClose => state.menu_open = None,
         Message::QuitApp => std::process::exit(0),
         Message::GoToToggle => {
             state.show_goto = !state.show_goto;
