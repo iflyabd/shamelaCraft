@@ -289,6 +289,15 @@ enum Message {
     ResetAll,
     OpenImported(String),
     FindPage,
+    GoToToggle,
+    GoToClose,
+    GoToInput(String),
+    GoToSubmit,
+    FindToggle,
+    FindClose,
+    FindInput(String),
+    FindNext,
+    FindPrev,
     DeleteBook(String),
 }
 
@@ -360,6 +369,12 @@ struct State {
     dl_queue: Vec<QueueItem>,
     dl_next_id: usize,
     show_downloads: bool,
+    show_goto: bool,
+    goto_input: String,
+    show_find: bool,
+    find_input: String,
+    find_hits: Vec<usize>,
+    find_pos: usize,
     font_size: f32,
     theme_kind: AppTheme,
     status: String,
@@ -413,6 +428,12 @@ impl Default for State {
             dl_queue: Vec::new(),
             dl_next_id: 1,
             show_downloads: false,
+            show_goto: false,
+            goto_input: String::new(),
+            show_find: false,
+            find_input: String::new(),
+            find_hits: Vec::new(),
+            find_pos: 0,
             dl_files: Vec::new(),
             dl_selected: std::collections::BTreeSet::new(),
             dl_filter: String::new(),
@@ -2384,7 +2405,13 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.notify_search = !state.notify_search;
         }
         Message::EscapePressed => {
-            if state.show_settings {
+            if state.show_goto {
+                state.show_goto = false;
+            } else if state.show_find {
+                state.show_find = false;
+                state.find_hits.clear();
+                state.find_pos = 0;
+            } else if state.show_settings {
                 state.show_settings = false;
             } else if state.show_downloads {
                 state.show_downloads = false;
@@ -2542,6 +2569,53 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             };
             state.status = format!("{count} matches on this page");
         }
+        Message::GoToToggle => {
+            state.show_goto = !state.show_goto;
+            if state.show_goto {
+                let current = active_reader(state)
+                    .map(|reader| (reader.index + 1).to_string())
+                    .unwrap_or_default();
+                state.goto_input = current;
+            }
+        }
+        Message::GoToClose => state.show_goto = false,
+        Message::GoToInput(text) => state.goto_input = text,
+        Message::GoToSubmit => {
+            let pages = active_reader(state).map_or(0, |reader| reader.pages.len());
+            if pages == 0 {
+                state.status = String::from("open a book first");
+            } else if let Some(page) = parse_number(&state.goto_input) {
+                if (1..=pages).contains(&page) {
+                    jump_to_page(state, page - 1);
+                    state.show_goto = false;
+                    state.status = format!("page {page} / {pages}");
+                } else {
+                    state.status = format!("page must be 1..{pages}");
+                }
+            } else {
+                state.status = String::from("type a page number");
+            }
+        }
+        Message::FindToggle => {
+            state.show_find = !state.show_find;
+            if state.show_find {
+                run_find(state);
+            } else {
+                state.find_hits.clear();
+                state.find_pos = 0;
+            }
+        }
+        Message::FindClose => {
+            state.show_find = false;
+            state.find_hits.clear();
+            state.find_pos = 0;
+        }
+        Message::FindInput(text) => {
+            state.find_input = text;
+            run_find(state);
+        }
+        Message::FindNext => find_step(state, 1),
+        Message::FindPrev => find_step(state, -1),
         Message::DeleteBook(name) => {
             let path = books_dir().join(&name);
             let _ = std::fs::remove_file(&path);
@@ -3255,6 +3329,8 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         button(ticon("next", 18.0)).on_press(Message::ReaderNext),
         text(label).font(AMIRI).size(16.0),
         button(ticon("prev", 18.0)).on_press(Message::ReaderPrev),
+        button(ticon("searchbok", 18.0)).on_press(Message::FindToggle),
+        button(ticon("searchpage", 18.0)).on_press(Message::GoToToggle),
         button(ticon("lang", 18.0)).on_press(Message::TranslatePage),
         button(ar(target.to_uppercase().as_str(), 13.0)).on_press(Message::CycleTarget),
     ]
@@ -3296,7 +3372,35 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         Length::Fill
     })
     .into();
-    let mut page_parts: Vec<Element<'_, Message>> = vec![nav.into(), page_scroll];
+    let mut page_parts: Vec<Element<'_, Message>> = Vec::new();
+    if state.show_find {
+        let hits = state.find_hits.len();
+        let counter = if hits == 0 {
+            String::from("0 / 0")
+        } else {
+            format!("{} / {hits}", state.find_pos + 1)
+        };
+        let mut bar = column![row![
+            ar_boxed(tr(state.lang, "find_word"), 12.0),
+            text_input(tr(state.lang, "find_in_book"), state.find_input.as_str())
+                .on_input(Message::FindInput)
+                .on_submit(Message::FindNext)
+                .padding(6),
+            button(ticon("prev", 16.0)).on_press(Message::FindPrev),
+            button(ticon("next", 16.0)).on_press(Message::FindNext),
+            ar_boxed(counter, 13.0),
+            button(ticon("x", 14.0)).on_press(Message::FindClose),
+        ]
+        .spacing(6)]
+        .spacing(4);
+        let snippet = find_snippet(state);
+        if !snippet.is_empty() {
+            bar = bar.push(ar(snippet, 12.0));
+        }
+        page_parts.push(bar.into());
+    }
+    page_parts.push(nav.into());
+    page_parts.push(page_scroll);
     if state.show_notes {
         page_parts.push(
             scrollable(column(note_items).spacing(2))
@@ -3564,13 +3668,158 @@ fn welcome(state: &State) -> Element<'static, Message> {
     .into()
 }
 
-fn status_bar(state: &State) -> Element<'_, Message> {
-    row![
+/// Active reader tab, when the front tab is a book.
+fn active_reader(state: &State) -> Option<&ReaderTab> {
+    let tab = state.active_tab.and_then(|index| state.tabs.get(index))?;
+    match &tab.kind {
+        TabKind::Reader(reader) => Some(reader),
+        _ => None,
+    }
+}
+
+/// Page/sura position for the status bar.
+fn reading_position(state: &State) -> Option<String> {
+    let tab = state.active_tab.and_then(|index| state.tabs.get(index))?;
+    match &tab.kind {
+        TabKind::Reader(reader) if !reader.pages.is_empty() => Some(format!(
+            "{} {} / {}",
+            tr(state.lang, "page_word"),
+            reader.index + 1,
+            reader.pages.len()
+        )),
+        TabKind::Quran { sura, .. } => {
+            Some(format!("{} {} / 114", tr(state.lang, "sura_word"), sura))
+        }
+        _ => None,
+    }
+}
+
+/// Parse a page number typed in Arabic-Indic or Latin digits.
+fn parse_number(text: &str) -> Option<usize> {
+    let mut digits = String::new();
+    for ch in text.chars() {
+        match ch {
+            '0'..='9' => digits.push(ch),
+            '\u{0660}'..='\u{0669}' => digits.push(char::from(b'0' + (ch as u32 - 0x0660) as u8)),
+            '\u{06F0}'..='\u{06F9}' => digits.push(char::from(b'0' + (ch as u32 - 0x06F0) as u8)),
+            _ => {}
+        }
+    }
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+/// Recompute the in-book find hits and show the first matching page.
+fn run_find(state: &mut State) {
+    let needle = shamela_index::normalize_arabic(&state.find_input, &state.search_opts);
+    let mut hits: Vec<usize> = Vec::new();
+    if !needle.trim().is_empty() {
+        if let Some(tab) = state.active_tab.and_then(|index| state.tabs.get(index)) {
+            if let TabKind::Reader(reader) = &tab.kind {
+                for (index, page) in reader.pages.iter().enumerate() {
+                    let text = content_to_text(&page.content);
+                    let hay = shamela_index::normalize_arabic(&text, &state.search_opts);
+                    if hay.contains(&needle) {
+                        hits.push(index);
+                    }
+                }
+            }
+        }
+    }
+    let total = hits.len();
+    let first = hits.first().copied();
+    state.find_hits = hits;
+    state.find_pos = 0;
+    if let Some(page) = first {
+        if active_reader(state).map(|reader| reader.index) != Some(page) {
+            jump_to_page(state, page);
+        }
+    }
+    state.status = if total == 0 {
+        tr(state.lang, "find_none").to_string()
+    } else {
+        format!("{} {total}", tr(state.lang, "find_hits"))
+    };
+}
+
+/// Jump between in-book find hits.
+fn find_step(state: &mut State, delta: isize) {
+    let len = state.find_hits.len();
+    if len == 0 {
+        state.status = tr(state.lang, "find_none").to_string();
+        return;
+    }
+    let current = state.find_pos.min(len - 1);
+    let next = (current as isize + delta).rem_euclid(len as isize) as usize;
+    state.find_pos = next;
+    let page = state.find_hits[next];
+    jump_to_page(state, page);
+    state.status = format!("{} {} / {len}", tr(state.lang, "find_hits"), next + 1);
+}
+
+/// First characters of the matching page, for the find bar.
+fn find_snippet(state: &State) -> String {
+    let Some(reader) = active_reader(state) else {
+        return String::new();
+    };
+    let Some(&page) = state.find_hits.get(state.find_pos) else {
+        return String::new();
+    };
+    let Some(page) = reader.pages.get(page) else {
+        return String::new();
+    };
+    let text = content_to_text(&page.content);
+    trim_text(text.trim(), 70)
+}
+
+/// Go-to-page popup.
+fn goto_modal(state: &State) -> Element<'_, Message> {
+    let dark = matches!(state.theme_kind, AppTheme::Dark);
+    let lang = state.lang;
+    let pages = active_reader(state).map_or(0, |reader| reader.pages.len());
+    let title = row![
+        button(ticon("x", 18.0)).on_press(Message::GoToClose),
         Space::with_width(Length::Fill),
-        ar(state.status.as_str(), 13.0),
+        ar_boxed(tr(lang, "goto_page"), 17.0),
+        ticon("searchpage", 20.0),
     ]
-    .padding(6)
-    .into()
+    .spacing(8);
+    let hint = if pages == 0 {
+        String::from("open a book first")
+    } else {
+        format!("1 .. {pages}")
+    };
+    let input = text_input(tr(lang, "page_word"), state.goto_input.as_str())
+        .on_input(Message::GoToInput)
+        .on_submit(Message::GoToSubmit)
+        .padding(8);
+    let actions = row![
+        button(ar_boxed(tr(lang, "goto"), 14.0)).on_press(Message::GoToSubmit),
+        button(ar_boxed(tr(lang, "cancel"), 14.0)).on_press(Message::GoToClose),
+    ]
+    .spacing(6);
+    let body = column![title, ar(hint, 13.0), input, actions]
+        .spacing(8)
+        .padding(4)
+        .width(Length::Fixed(320.0));
+    let card = container(body)
+        .padding(16)
+        .width(Length::Fixed(360.0))
+        .style(popup_card_style(dark));
+    modal_shell(card)
+}
+
+fn status_bar(state: &State) -> Element<'_, Message> {
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    if let Some(position) = reading_position(state) {
+        items.push(ar_boxed(position, 13.0));
+    }
+    items.push(Space::with_width(Length::Fill).into());
+    items.push(ar(state.status.as_str(), 13.0));
+    row(items).padding(6).into()
 }
 
 /// Reading-page background style.
@@ -3978,8 +4227,19 @@ fn toggle_row(label: String, on: bool, msg: Message) -> Element<'static, Message
 
 /// Global hotkeys mirroring the classic program (F5/F6 pages, F3 search,
 /// F10 import dialog, Esc closes the current tab).
-fn hotkey(key: keyboard::Key, _mods: keyboard::Modifiers) -> Option<Message> {
+fn hotkey(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> {
     use iced::keyboard::key::Named;
+    if mods.control() {
+        let shortcut = match &key {
+            keyboard::Key::Character(ch) => ch.as_str(),
+            _ => "",
+        };
+        match shortcut {
+            "f" | "F" => return Some(Message::FindToggle),
+            "g" | "G" => return Some(Message::GoToToggle),
+            _ => {}
+        }
+    }
     match key {
         keyboard::Key::Named(Named::F5) => Some(Message::ReaderNext),
         keyboard::Key::Named(Named::F6) => Some(Message::ReaderPrev),
@@ -4026,7 +4286,7 @@ fn view(state: &State) -> Element<'_, Message> {
         .into()
     };
     let content = column![top, body, status_bar(state)];
-    if !state.show_settings && !state.show_downloads {
+    if !state.show_settings && !state.show_downloads && !state.show_goto {
         return content.into();
     }
     let mut stack = Stack::new().push(content);
@@ -4035,6 +4295,9 @@ fn view(state: &State) -> Element<'_, Message> {
     }
     if state.show_downloads {
         stack = stack.push(downloads_modal(state));
+    }
+    if state.show_goto {
+        stack = stack.push(goto_modal(state));
     }
     stack.width(Length::Fill).height(Length::Fill).into()
 }
