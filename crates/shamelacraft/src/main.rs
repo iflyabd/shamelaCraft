@@ -289,6 +289,9 @@ enum Message {
     ResetAll,
     OpenImported(String),
     FindPage,
+    MenuToggle(usize),
+    MenuClose,
+    QuitApp,
     GoToToggle,
     GoToClose,
     GoToInput(String),
@@ -369,6 +372,7 @@ struct State {
     dl_queue: Vec<QueueItem>,
     dl_next_id: usize,
     show_downloads: bool,
+    menu_open: Option<usize>,
     show_goto: bool,
     goto_input: String,
     show_find: bool,
@@ -428,6 +432,7 @@ impl Default for State {
             dl_queue: Vec::new(),
             dl_next_id: 1,
             show_downloads: false,
+            menu_open: None,
             show_goto: false,
             goto_input: String::new(),
             show_find: false,
@@ -2259,6 +2264,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn apply(state: &mut State, message: Message) -> Task<Message> {
+    if !matches!(&message, Message::MenuToggle(_) | Message::MenuClose) {
+        state.menu_open = None;
+    }
     match message {
         Message::OpenDatabase => open_database(state),
         Message::ImportBok => import_bok(state),
@@ -2405,7 +2413,9 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.notify_search = !state.notify_search;
         }
         Message::EscapePressed => {
-            if state.show_goto {
+            if state.menu_open.is_some() {
+                state.menu_open = None;
+            } else if state.show_goto {
                 state.show_goto = false;
             } else if state.show_find {
                 state.show_find = false;
@@ -2569,6 +2579,15 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             };
             state.status = format!("{count} matches on this page");
         }
+        Message::MenuToggle(index) => {
+            state.menu_open = if state.menu_open == Some(index) {
+                None
+            } else {
+                Some(index)
+            };
+        }
+        Message::MenuClose => state.menu_open = None,
+        Message::QuitApp => std::process::exit(0),
         Message::GoToToggle => {
             state.show_goto = !state.show_goto;
             if state.show_goto {
@@ -3668,6 +3687,118 @@ fn welcome(state: &State) -> Element<'static, Message> {
     .into()
 }
 
+/// One menu: title key plus its action entries.
+type MenuDef = (&'static str, Vec<(&'static str, Message)>);
+
+/// Menu bar contents: title key plus the actions of each menu.
+fn menu_entries(state: &State) -> Vec<MenuDef> {
+    let close_tab = Message::TabClosed(state.active_tab.unwrap_or(0));
+    vec![
+        (
+            "menu_file",
+            vec![
+                ("open_db", Message::OpenDatabase),
+                ("import_bok", Message::ImportBok),
+                ("download_from_net", Message::DownloadOpen),
+                ("export", Message::ExportBook),
+                ("close", close_tab),
+                ("quit", Message::QuitApp),
+            ],
+        ),
+        (
+            "menu_edit",
+            vec![
+                ("copy_page", Message::CopyPage),
+                ("add_bookmark", Message::BookmarkAdd),
+                ("find_book", Message::SearchBook),
+                ("find_page", Message::FindPage),
+            ],
+        ),
+        (
+            "menu_search",
+            vec![
+                ("new_search", Message::FocusBook),
+                ("find_book", Message::SearchBook),
+                ("last_search", Message::LastSearch),
+                ("authors", Message::PanelSelected(Panel::Authors)),
+            ],
+        ),
+        (
+            "menu_view",
+            vec![
+                ("sections", Message::PanelSelected(Panel::Library)),
+                ("authors", Message::PanelSelected(Panel::Authors)),
+                ("bookmarks", Message::PanelSelected(Panel::Bookmarks)),
+                ("notes", Message::ToggleNotes),
+                ("toc_word", Message::ToggleToc),
+                ("theme", Message::ThemeToggle),
+                ("settings", Message::ToggleSettings),
+            ],
+        ),
+        (
+            "menu_quran",
+            vec![
+                ("quran", Message::PanelSelected(Panel::Quran)),
+                ("download_quran", Message::QuranDownload),
+                ("tafsir", Message::TafsirToggle),
+                ("tafsir_next", Message::TafsirCycle),
+            ],
+        ),
+        (
+            "menu_help",
+            vec![
+                ("help", Message::OpenHelp),
+                ("upgrade", Message::OpenReleases),
+                ("about", Message::About),
+            ],
+        ),
+    ]
+}
+
+/// Desktop-style menu bar with an expanding item strip (RTL aware).
+fn menu_bar(state: &State) -> Element<'_, Message> {
+    let lang = state.lang;
+    let menus = menu_entries(state);
+    let mut titles: Vec<Element<'_, Message>> = Vec::new();
+    for (index, (key, _)) in menus.iter().enumerate() {
+        let open = state.menu_open == Some(index);
+        let entry: Element<'_, Message> = if open {
+            button(ar_boxed(tr(lang, key), 13.0))
+                .on_press(Message::MenuToggle(index))
+                .style(accent_style(state.accent.color(), state.chrome().radius))
+                .into()
+        } else {
+            button(ar_boxed(tr(lang, key), 13.0))
+                .on_press(Message::MenuToggle(index))
+                .style(button::text)
+                .into()
+        };
+        titles.push(entry);
+    }
+    titles.reverse();
+    titles.insert(0, Space::with_width(Length::Fill).into());
+    let bar = row(titles).spacing(2).padding(2);
+    let Some(open) = state.menu_open else {
+        return bar.into();
+    };
+    let Some((_, items)) = menus.get(open) else {
+        return bar.into();
+    };
+    let mut strip: Vec<Element<'_, Message>> = Vec::new();
+    for (key, action) in items {
+        strip.push(
+            button(ar_boxed(tr(lang, key), 13.0))
+                .on_press(action.clone())
+                .style(button::text)
+                .into(),
+        );
+    }
+    strip.reverse();
+    strip.insert(0, Space::with_width(Length::Fill).into());
+    let strip_row = row(strip).spacing(2).padding(2);
+    column![bar, strip_row].spacing(1).into()
+}
+
 /// Active reader tab, when the front tab is a book.
 fn active_reader(state: &State) -> Option<&ReaderTab> {
     let tab = state.active_tab.and_then(|index| state.tabs.get(index))?;
@@ -4263,7 +4394,7 @@ fn subscribe(state: &State) -> iced::Subscription<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    let top = tool_bar(state);
+    let top = column![menu_bar(state), tool_bar(state)].spacing(2);
     let body: Element<'_, Message> = if state.lib.is_none() && state.tabs.is_empty() {
         welcome(state)
     } else {
