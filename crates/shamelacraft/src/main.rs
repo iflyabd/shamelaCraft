@@ -1428,13 +1428,18 @@ fn fmt_size(bytes: u64) -> String {
 }
 
 /// Leaf file name, trimmed for display.
-fn display_name(name: &str) -> String {
-    let leaf = name.rsplit('/').next().unwrap_or(name);
-    let mut out: String = leaf.chars().take(44).collect();
-    if leaf.chars().count() > 44 {
+/// Trim text to `max` characters, adding an ellipsis when shortened.
+fn trim_text(content: &str, max: usize) -> String {
+    let mut out: String = content.chars().take(max).collect();
+    if content.chars().count() > max {
         out.push('…');
     }
     out
+}
+
+/// Leaf file name, trimmed for display.
+fn display_name(name: &str) -> String {
+    trim_text(name.rsplit('/').next().unwrap_or(name), 38)
 }
 
 /// Short kind badge of a source file.
@@ -2829,6 +2834,7 @@ const PANEL_FILE_ROWS: usize = 120;
 const MODAL_FILE_ROWS: usize = 250;
 
 /// One source-file row: selection box, download button, size, kind, name.
+/// One source-file row: selection box, download button, size, kind, name.
 fn file_row(
     state: &State,
     file: &shamela_import::archive::ArchiveFile,
@@ -2842,9 +2848,34 @@ fn file_row(
         ar_boxed(fmt_size(file.size), 12.0),
         ar_boxed(file_kind(&file.name, state.lang), 12.0),
         Space::with_width(Length::Fill),
-        ar(display_name(&file.name), 13.0),
+        ar_boxed(display_name(&file.name), 13.0),
     ]
     .spacing(6)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Narrow variant for the side panel: the name lives in a fill row.
+fn file_row_panel(
+    state: &State,
+    file: &shamela_import::archive::ArchiveFile,
+) -> Element<'static, Message> {
+    let selected = state.dl_selected.contains(&file.name);
+    let label = format!("{} ({})", display_name(&file.name), fmt_size(file.size));
+    row![
+        button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
+            .on_press(Message::DlToggleFile(file.name.clone())),
+        button(ar_boxed(tr(state.lang, "download"), 12.0))
+            .on_press(Message::DownloadFile(file.name.clone())),
+        list_row(
+            label,
+            false,
+            Message::DownloadFile(file.name.clone()),
+            item_size(state.font_size) - 2.0,
+            state.chrome(),
+        ),
+    ]
+    .spacing(4)
     .width(Length::Fill)
     .into()
 }
@@ -2898,7 +2929,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
         ));
     }
     for file in visible.iter().take(PANEL_FILE_ROWS) {
-        items.push(file_row(state, file));
+        items.push(file_row_panel(state, file));
     }
     scrollable(column(items).spacing(6))
         .height(Length::Fill)
@@ -3547,10 +3578,10 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
             .into()
     };
     let title = row![
-        ticon("options", 22.0),
-        ar_boxed(tr(state.lang, "settings"), 18.0),
-        Space::with_width(Length::Fill),
         button(ticon("x", 18.0)).on_press(Message::ToggleSettings),
+        Space::with_width(Length::Fill),
+        ar_boxed(tr(state.lang, "settings"), 18.0),
+        ticon("options", 22.0),
     ]
     .spacing(8);
     let font_row = row![
@@ -3680,14 +3711,15 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
 }
 
 /// Download manager popup: source, selection, queue and per-file downloads.
+/// Download manager popup: source, selection, queue and per-file downloads.
 fn downloads_modal(state: &State) -> Element<'_, Message> {
     let dark = matches!(state.theme_kind, AppTheme::Dark);
     let lang = state.lang;
     let title = row![
-        ticon("globe", 22.0),
-        ar_boxed(tr(lang, "downloads"), 18.0),
-        Space::with_width(Length::Fill),
         button(ticon("x", 18.0)).on_press(Message::DlToggle),
+        Space::with_width(Length::Fill),
+        ar_boxed(tr(lang, "downloads"), 18.0),
+        ticon("globe", 22.0),
     ]
     .spacing(8);
 
@@ -3701,7 +3733,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     ]
     .spacing(6);
 
-    let mut chips: Vec<Element<'_, Message>> = vec![ar(tr(lang, "preset_sources"), 13.0)];
+    let mut chips: Vec<Element<'_, Message>> = vec![ar_boxed(tr(lang, "preset_sources"), 13.0)];
     for (id, label) in DL_PRESETS {
         chips.push(
             button(ar_boxed(*label, 12.0))
@@ -3727,8 +3759,11 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         button(ar_boxed(tr(lang, "download_selected"), 14.0)).on_press(Message::DlDownloadSelected),
         button(ar_boxed(tr(lang, "select_all"), 14.0)).on_press(Message::DlSelectAll),
         button(ar_boxed(tr(lang, "select_none"), 14.0)).on_press(Message::DlSelectNone),
+    ]
+    .spacing(6);
+    let controls2 = row![
         button(ar_boxed(tr(lang, "download_current"), 14.0)).on_press(Message::DownloadCurrent),
-        button(ar_boxed(tr(lang, "cancel"), 14.0)).on_press(Message::DlCancel),
+        button(ar_boxed(tr(lang, "stop_all"), 14.0)).on_press(Message::DlCancel),
     ]
     .spacing(6);
 
@@ -3745,11 +3780,11 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
 
     let done = state.dl_queue.iter().filter(|job| job.done).count();
     let queue_header = row![
-        ar(tr(lang, "dl_queue"), 15.0),
-        ar(format!("{done}/{}", state.dl_queue.len()), 13.0),
         Space::with_width(Length::Fill),
-        button(ar_boxed(tr(lang, "clear_finished"), 12.0)).on_press(Message::DlClearFinished),
         button(ar_boxed(tr(lang, "open_folder"), 12.0)).on_press(Message::DlOpenFolder),
+        button(ar_boxed(tr(lang, "clear_finished"), 12.0)).on_press(Message::DlClearFinished),
+        ar_boxed(format!("{done}/{}", state.dl_queue.len()), 13.0),
+        ar_boxed(tr(lang, "dl_queue"), 15.0),
     ]
     .spacing(6);
 
@@ -3798,10 +3833,10 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         rows.push(
             column![
                 row![
-                    ar(job.label.clone(), 15.0),
-                    ar(kind, 12.0),
+                    ar_boxed(kind, 12.0),
                     Space::with_width(Length::Fill),
-                    ar(status, 13.0),
+                    ar_boxed(trim_text(&status, 26), 13.0),
+                    ar_boxed(display_name(&job.label), 15.0),
                 ]
                 .spacing(6),
                 progress_bar(0.0..=1.0, job.progress.fraction()).height(10.0),
@@ -3818,7 +3853,9 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         .padding(6)
         .width(Length::Fixed(220.0));
     let files_header = row![
-        ar(
+        filter,
+        Space::with_width(Length::Fill),
+        ar_boxed(
             format!(
                 "{} — {} {}/{}",
                 tr(lang, "files_of"),
@@ -3828,8 +3865,6 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
             ),
             13.0,
         ),
-        Space::with_width(Length::Fill),
-        filter,
     ]
     .spacing(6);
     let mut files: Vec<Element<'_, Message>> = Vec::new();
@@ -3846,6 +3881,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         source_row,
         presets,
         controls,
+        controls2,
         summary,
         queue_header,
         list,
