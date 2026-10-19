@@ -16,8 +16,11 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - Tabbed catalog cards (title, authors, death dates, print status)
 - Legacy `.bok` import (pure-Rust Jet/MDB reader) into local `Page`/`Title`
   databases, with full-text reader tabs, page navigation, and TOC jumping
-- **Download manager**: keyless archive.org packs, per-file / per-pack /
-  whole-item / open-book re-download, live progress, cancel, retry, remove
+- **Download manager**: keyless archive.org sources (ready-made presets or a
+  pasted item URL), per-file / multi-select / whole-item packs, per-book
+  download by title, open-book re-download (reader header + card), name
+  filter, size/kind badges, live progress, queue summary with clear-finished
+  and open-folder, cancel, retry, remove
 - **One unified reading pane** for imported books and the Uthmani Quran
 - **Quran tab** with the sura index replacing the library tree, plus nine
   keyless Arabic tafsirs cached locally
@@ -107,10 +110,16 @@ the RTL interface; it is pure Rust.)
 
 Three keyless paths, all offline-friendly after the first fetch:
 
-1. **In-app downloads (easiest).** Open the تحميل panel, keep or change the
-   archive.org item id (e.g. `shamela-16241`, `shamela-13700`, `golden-shamela_202601`),
-   list the `.bok` files, and download any book — it converts to the local
-   `Page`/`Title` format and opens in a reader tab automatically.
+1. **In-app downloads (easiest).** Press the globe (التحميل) button. The
+   manager takes an archive.org item id or a pasted URL, offers ready sources
+   (e.g. `mutunulhadith` — 172 single-book `.bok` files), and lists every
+   importable file with its size and kind. Search the list by name (فلترة),
+   tick several books (تحديد الكل / تحديد) and download just those — real
+   per-book downloads from `.bok` collections; or download the whole pack.
+   The open book can be fetched from the reader header (تحميل الكتاب): if it
+   was imported before it re-downloads its recorded source, otherwise the
+   best title match inside the listed source is queued. Everything converts
+   to the local `Page`/`Title` format and opens in a reader tab automatically.
 2. **Local `.bok` files.** Use استيراد BOK to convert any legacy `.bok`
    (Jet3/MDB, Windows-1256) with the pure-Rust importer.
 3. **Official per-book databases** (needs a free API key from mail@shamela.ws)
@@ -185,8 +194,10 @@ MIT — see [LICENSE-MIT](LICENSE-MIT).
 - فتح `master.db` للقراءة فقط دون أي تعديل
 - تصفح شجرة الأقسام والكتب بالترتيب الأصلي
 - بحث عربي متسامح (يتجاهل التشكيل والهمز والتطويل) في العناوين والمؤلفين
-- مدير تحميلات: حزم archive.org بلا مفاتيح، تحميل ملف أو حزمة أو الكتاب
-  المفتوح، تقدم حي، إلغاء وإعادة ومتابعة قائمة الانتظار
+- مدير تحميلات: مصادر archive.org جاهزة أو رابط ملصق، تحميل ملف أو عدة
+  ملفات محددة أو الحزمة كاملة، تحميل الكتاب المفتوح من رأس القارئ، فلترة
+  الأسماء وأحجام الملفات، تقدم حي، ملخص قائمة الانتظار، فتح مجلد التنزيلات،
+  مسح المكتمل، إلغاء وإعادة وإزالة
 - نافذة قراءة موحدة للكتب والقرآن الكريم، وفهرس السور محل شجرة المكتبة
 - تبويب للقرآن مع تسعة تفاسير عربية تُحفظ محليا
 - إعدادات محفوظة: حجم الخط، تباعد الأسطر، ألوان النص والخلفية، لون

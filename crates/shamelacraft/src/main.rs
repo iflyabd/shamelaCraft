@@ -235,6 +235,14 @@ enum Message {
     DlRetry(usize),
     DlCancel,
     DownloadCurrent,
+    DlToggleFile(String),
+    DlSelectAll,
+    DlSelectNone,
+    DlDownloadSelected,
+    DlFilterInput(String),
+    DlClearFinished,
+    DlOpenFolder,
+    DlPresetSource(String),
     AccentNext,
     ToggleCorners,
     LineBigger,
@@ -346,6 +354,8 @@ struct State {
     target_lang: String,
     dl_id: String,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
+    dl_selected: std::collections::BTreeSet<String>,
+    dl_filter: String,
     dl_queue: Vec<QueueItem>,
     dl_next_id: usize,
     show_downloads: bool,
@@ -398,11 +408,13 @@ impl Default for State {
             search_opts: NormalizeOptions::default(),
             control_files: Vec::new(),
             target_lang: String::from("en"),
-            dl_id: String::from("shamela-16241"),
+            dl_id: String::from("mutunulhadith"),
             dl_queue: Vec::new(),
             dl_next_id: 1,
             show_downloads: false,
             dl_files: Vec::new(),
+            dl_selected: std::collections::BTreeSet::new(),
+            dl_filter: String::new(),
             font_size: 24.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
@@ -1135,6 +1147,8 @@ fn refresh_download_list(state: &mut State) {
             let items = shamela_import::archive::downloadable_files(&files);
             let count = items.len();
             state.dl_files = items.into_iter().cloned().collect();
+            state.dl_selected.clear();
+            state.dl_filter.clear();
             state.status = format!("item {id}: {count} importable files");
         }
         Err(err) => {
@@ -1370,36 +1384,156 @@ fn enqueue_file(state: &mut State, name: String) {
     state.status = format!("queued: {file_name}");
 }
 
-/// Re-download the book that is open right now (uses its recorded source URL).
+/// Parse an archive.org item id out of a bare id or a pasted URL.
+fn parse_item_id(raw: &str) -> String {
+    let text = raw.trim();
+    if let Some(rest) = text.split("archive.org/details/").nth(1) {
+        return rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(rest)
+            .to_string();
+    }
+    if let Some(rest) = text.split("archive.org/download/").nth(1) {
+        return rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(rest)
+            .to_string();
+    }
+    text.trim_end_matches('/').to_string()
+}
+
+/// Loose name key for matching book titles and file names (drops tashkeel,
+/// tatweel and everything that is not a letter or digit).
+fn match_key(content: &str) -> String {
+    content
+        .chars()
+        .filter(|ch| !matches!(ch, '\u{064B}'..='\u{0652}' | '\u{0640}' | '\u{0670}'))
+        .flat_map(|ch| ch.to_lowercase())
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
+}
+
+/// "540 KB" / "12.3 MB" / "1.20 GB".
+fn fmt_size(bytes: u64) -> String {
+    let mib = bytes as f64 / 1_048_576.0;
+    if mib >= 1024.0 {
+        format!("{:.2} GB", mib / 1024.0)
+    } else if mib >= 1.0 {
+        format!("{mib:.1} MB")
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+/// Leaf file name, trimmed for display.
+fn display_name(name: &str) -> String {
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    let mut out: String = leaf.chars().take(44).collect();
+    if leaf.chars().count() > 44 {
+        out.push('…');
+    }
+    out
+}
+
+/// Short kind badge of a source file.
+fn file_kind(name: &str, lang: Lang) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".bok") {
+        tr(lang, "kind_book")
+    } else if shamela_import::extract::is_importable(name) {
+        tr(lang, "kind_pack")
+    } else {
+        tr(lang, "kind_unsupported")
+    }
+}
+
+/// Source files filtered by the name filter (list order preserved).
+fn visible_files(state: &State) -> Vec<shamela_import::archive::ArchiveFile> {
+    let needle = match_key(&state.dl_filter);
+    state
+        .dl_files
+        .iter()
+        .filter(|file| needle.is_empty() || match_key(&file.name).contains(&needle))
+        .cloned()
+        .collect()
+}
+
+/// Queue every selected source file (list order).
+fn download_selected(state: &mut State) {
+    let names: Vec<String> = state
+        .dl_files
+        .iter()
+        .filter(|file| state.dl_selected.contains(&file.name))
+        .map(|file| file.name.clone())
+        .collect();
+    if names.is_empty() {
+        state.status = String::from("nothing selected");
+        return;
+    }
+    let count = names.len();
+    for name in names {
+        enqueue_file(state, name);
+    }
+    state.status = format!("queued {count} selected file(s)");
+}
+
+/// Download the book that is open right now: the recorded source URL of an
+/// imported book when known, otherwise the best name match inside the listed
+/// source item (real per-book download from a `.bok` collection).
 fn download_current(state: &mut State) {
-    let Some(tab) = state.active_tab.and_then(|index| state.tabs.get(index)) else {
+    let Some(index) = state.active_tab else {
         state.status = String::from("open a book first");
         return;
     };
-    let Some(db) = tab.db.clone() else {
-        state.status = String::from("this book has no local download source");
+    let Some(tab) = state.tabs.get(index) else {
         return;
     };
-    let stem = db
-        .file_stem()
-        .and_then(|part| part.to_str())
-        .unwrap_or("book")
-        .to_string();
-    let sidecar = books_dir().join(format!("{stem}.db.url"));
-    let Ok(url) = std::fs::read_to_string(&sidecar) else {
-        state.status = String::from("no source url recorded for this book");
-        return;
-    };
-    let url = url.trim().to_string();
-    if url.is_empty() {
-        state.status = String::from("empty source url");
-        return;
+    let title = tab.title.clone();
+    let db = tab.db.clone();
+
+    if let Some(db) = db {
+        let stem = db
+            .file_stem()
+            .and_then(|part| part.to_str())
+            .unwrap_or("book")
+            .to_string();
+        if let Ok(url) = std::fs::read_to_string(books_dir().join(format!("{stem}.db.url"))) {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                let file_name = url.rsplit('/').next().unwrap_or("book.bok").to_string();
+                let dest = downloads_dir().join(&file_name);
+                let after = after_kind(&file_name);
+                enqueue(state, file_name.clone(), url, dest, after);
+                state.status = format!("re-downloading: {file_name}");
+                return;
+            }
+        }
     }
-    let file_name = url.rsplit('/').next().unwrap_or("book.bok").to_string();
-    let dest = downloads_dir().join(&file_name);
-    let after = after_kind(&file_name);
-    enqueue(state, file_name.clone(), url, dest, after);
-    state.status = format!("re-downloading: {file_name}");
+
+    let key = match_key(&title);
+    if !key.is_empty() {
+        let hit = state
+            .dl_files
+            .iter()
+            .find(|file| {
+                let stem = std::path::Path::new(&file.name)
+                    .file_stem()
+                    .and_then(|part| part.to_str())
+                    .unwrap_or(&file.name);
+                let stem_key = match_key(stem);
+                !stem_key.is_empty() && (stem_key.contains(&key) || key.contains(&stem_key))
+            })
+            .cloned();
+        if let Some(file) = hit {
+            enqueue_file(state, file.name.clone());
+            state.status = format!("queued book: {}", display_name(&file.name));
+            return;
+        }
+    }
+
+    state.status = String::from(tr(state.lang, "no_source_match"));
 }
 
 fn cancel_all(state: &mut State) {
@@ -2084,15 +2218,21 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::ReaderNext => move_page(state, 1),
         Message::TocJump(target) => jump_to_page(state, target),
         Message::DownloadIdInput(id) => {
-            state.dl_id = id;
+            state.dl_id = parse_item_id(&id);
         }
         Message::DownloadList => refresh_download_list(state),
         Message::DownloadFile(name) => enqueue_file(state, name),
         Message::DownloadAll => {
             let files: Vec<String> = state.dl_files.iter().map(|f| f.name.clone()).collect();
+            let count = files.len();
             for name in files {
                 enqueue_file(state, name);
             }
+            state.status = if count == 0 {
+                String::from("no files listed — fetch a source first")
+            } else {
+                format!("queued all {count} file(s)")
+            };
         }
         Message::DownloadCurrent => download_current(state),
         Message::DownloadOpen => {
@@ -2105,6 +2245,38 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DlRemove(id) => remove_job(state, id),
         Message::DlRetry(id) => retry_job(state, id),
         Message::DlCancel => cancel_all(state),
+        Message::DlToggleFile(name) => {
+            if !state.dl_selected.remove(&name) {
+                state.dl_selected.insert(name);
+            }
+        }
+        Message::DlSelectAll => {
+            let files = visible_files(state);
+            for file in files {
+                state.dl_selected.insert(file.name);
+            }
+            state.status = format!("selected {} file(s)", state.dl_selected.len());
+        }
+        Message::DlSelectNone => {
+            state.dl_selected.clear();
+            state.status = String::from("selection cleared");
+        }
+        Message::DlDownloadSelected => download_selected(state),
+        Message::DlFilterInput(text) => state.dl_filter = text,
+        Message::DlClearFinished => {
+            let before = state.dl_queue.len();
+            state.dl_queue.retain(|job| !job.done);
+            state.status = format!("cleared {} finished job(s)", before - state.dl_queue.len());
+        }
+        Message::DlOpenFolder => {
+            let dir = downloads_dir();
+            open_external(&dir.display().to_string());
+            state.status = format!("downloads: {}", dir.display());
+        }
+        Message::DlPresetSource(id) => {
+            state.dl_id = id;
+            refresh_download_list(state);
+        }
         Message::AccentNext => {
             state.accent = state.accent.next();
         }
@@ -2645,35 +2817,90 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
         .into()
 }
 
+/// Curated keyless archive.org sources (id, Arabic label).
+const DL_PRESETS: &[(&str, &str)] = &[
+    ("mutunulhadith", "متون الحديث (١٧٢ كتاب)"),
+    ("kotobe-mojahed-din-maktab-shamele", "مكتبة كتب — حزمة"),
+    ("ShamelaLibrary348-1", "الشاملة الرسمية — حزمة"),
+];
+
+/// How many source-file rows each view draws (further rows need filtering).
+const PANEL_FILE_ROWS: usize = 120;
+const MODAL_FILE_ROWS: usize = 250;
+
+/// One source-file row: selection box, download button, size, kind, name.
+fn file_row(
+    state: &State,
+    file: &shamela_import::archive::ArchiveFile,
+) -> Element<'static, Message> {
+    let selected = state.dl_selected.contains(&file.name);
+    row![
+        button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
+            .on_press(Message::DlToggleFile(file.name.clone())),
+        button(ar_boxed(tr(state.lang, "download"), 12.0))
+            .on_press(Message::DownloadFile(file.name.clone())),
+        ar_boxed(fmt_size(file.size), 12.0),
+        ar_boxed(file_kind(&file.name, state.lang), 12.0),
+        Space::with_width(Length::Fill),
+        ar(display_name(&file.name), 13.0),
+    ]
+    .spacing(6)
+    .width(Length::Fill)
+    .into()
+}
+
 fn downloads_panel(state: &State) -> Element<'_, Message> {
-    let input = text_input("archive.org item id ...", state.dl_id.as_str())
+    let lang = state.lang;
+    let input = text_input(tr(lang, "source_hint"), state.dl_id.as_str())
         .on_input(Message::DownloadIdInput)
+        .on_submit(Message::DownloadList)
         .padding(8);
-    let fetch = button(ar(tr(state.lang, "fetch_books"), 14.0))
+    let fetch = button(ar_boxed(tr(lang, "fetch_books"), 14.0))
         .on_press(Message::DownloadList)
         .width(Length::Fill);
     let actions = row![
-        button(ar(tr(state.lang, "download_all"), 14.0))
+        button(ar_boxed(tr(lang, "download_all"), 14.0))
             .on_press(Message::DownloadAll)
             .width(Length::Fill),
-        button(ar(tr(state.lang, "dl_queue"), 14.0))
-            .on_press(Message::DownloadOpen)
+        button(ar_boxed(tr(lang, "download_selected"), 14.0))
+            .on_press(Message::DlDownloadSelected)
             .width(Length::Fill),
     ]
     .spacing(4);
-    let mut items: Vec<Element<'_, Message>> = vec![input.into(), fetch.into(), actions.into()];
-    for file in &state.dl_files {
-        let megabytes = file.size as f64 / 1_048_576.0;
-        let label = format!("{} ({megabytes:.1} MB)", file.name);
-        items.push(list_row(
-            label,
-            false,
-            Message::DownloadFile(file.name.clone()),
-            item_size(state.font_size),
-            state.chrome(),
+    let actions2 = row![
+        button(ar_boxed(tr(lang, "dl_queue"), 14.0))
+            .on_press(Message::DownloadOpen)
+            .width(Length::Fill),
+        button(ar_boxed(tr(lang, "open_folder"), 14.0))
+            .on_press(Message::DlOpenFolder)
+            .width(Length::Fill),
+    ]
+    .spacing(4);
+    let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
+        .on_input(Message::DlFilterInput)
+        .padding(6);
+    let mut items: Vec<Element<'_, Message>> = vec![
+        ar(tr(lang, "downloads"), title_size(state.font_size)),
+        input.into(),
+        fetch.into(),
+        actions.into(),
+        actions2.into(),
+        filter.into(),
+    ];
+    let visible = visible_files(state);
+    let total = state.dl_files.len();
+    if total == 0 {
+        items.push(ar(tr(lang, "no_files"), item_size(state.font_size) - 2.0));
+    } else {
+        items.push(ar(
+            format!("{} {}/{}", tr(lang, "shown_of"), visible.len(), total),
+            item_size(state.font_size) - 2.0,
         ));
     }
-    scrollable(column(items).spacing(4))
+    for file in visible.iter().take(PANEL_FILE_ROWS) {
+        items.push(file_row(state, file));
+    }
+    scrollable(column(items).spacing(6))
         .height(Length::Fill)
         .into()
 }
@@ -3133,6 +3360,12 @@ fn reader(state: &State) -> Element<'_, Message> {
                 TabKind::Card(body) => column![
                     row![
                         tool_btn(
+                            "export",
+                            ("Download", "تحميل الكتاب"),
+                            Message::DownloadCurrent,
+                            chrome
+                        ),
+                        tool_btn(
                             "bkmrk",
                             ("Bookmark", "إشارة مرجعية"),
                             Message::BookmarkAdd,
@@ -3167,6 +3400,12 @@ fn reader(state: &State) -> Element<'_, Message> {
                 .into(),
                 TabKind::Reader(reader_tab) => column![
                     row![
+                        tool_btn(
+                            "export",
+                            ("Download", "تحميل الكتاب"),
+                            Message::DownloadCurrent,
+                            chrome
+                        ),
                         tool_btn(
                             "bkmrk",
                             ("Bookmark", "إشارة مرجعية"),
@@ -3440,27 +3679,83 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
     modal_shell(card)
 }
 
-/// Download manager popup: queue, progress, per-job controls.
+/// Download manager popup: source, selection, queue and per-file downloads.
 fn downloads_modal(state: &State) -> Element<'_, Message> {
     let dark = matches!(state.theme_kind, AppTheme::Dark);
+    let lang = state.lang;
     let title = row![
         ticon("globe", 22.0),
-        ar_boxed(tr(state.lang, "downloads"), 18.0),
+        ar_boxed(tr(lang, "downloads"), 18.0),
         Space::with_width(Length::Fill),
         button(ticon("x", 18.0)).on_press(Message::DlToggle),
     ]
     .spacing(8);
-    let controls = row![
-        button(ar_boxed(tr(state.lang, "download_all"), 14.0)).on_press(Message::DownloadAll),
-        button(ar_boxed(tr(state.lang, "download_current"), 14.0))
-            .on_press(Message::DownloadCurrent),
-        button(ar_boxed(tr(state.lang, "fetch_books"), 14.0)).on_press(Message::DownloadList),
-        button(ar_boxed(tr(state.lang, "cancel"), 14.0)).on_press(Message::DlCancel),
+
+    let input = text_input(tr(lang, "source_hint"), state.dl_id.as_str())
+        .on_input(Message::DownloadIdInput)
+        .on_submit(Message::DownloadList)
+        .padding(8);
+    let source_row = row![
+        input,
+        button(ar_boxed(tr(lang, "fetch_books"), 14.0)).on_press(Message::DownloadList),
     ]
     .spacing(6);
+
+    let mut chips: Vec<Element<'_, Message>> = vec![ar(tr(lang, "preset_sources"), 13.0)];
+    for (id, label) in DL_PRESETS {
+        chips.push(
+            button(ar_boxed(*label, 12.0))
+                .on_press(Message::DlPresetSource(String::from(*id)))
+                .into(),
+        );
+    }
+    let presets = row(chips).spacing(6);
+
+    let total = state.dl_files.len();
+    let visible = visible_files(state);
+    let all_size: u64 = state.dl_files.iter().map(|file| file.size).sum();
+    let sel_size: u64 = state
+        .dl_files
+        .iter()
+        .filter(|file| state.dl_selected.contains(&file.name))
+        .map(|file| file.size)
+        .sum();
+    let sel_count = state.dl_selected.len();
+
+    let controls = row![
+        button(ar_boxed(tr(lang, "download_all"), 14.0)).on_press(Message::DownloadAll),
+        button(ar_boxed(tr(lang, "download_selected"), 14.0)).on_press(Message::DlDownloadSelected),
+        button(ar_boxed(tr(lang, "select_all"), 14.0)).on_press(Message::DlSelectAll),
+        button(ar_boxed(tr(lang, "select_none"), 14.0)).on_press(Message::DlSelectNone),
+        button(ar_boxed(tr(lang, "download_current"), 14.0)).on_press(Message::DownloadCurrent),
+        button(ar_boxed(tr(lang, "cancel"), 14.0)).on_press(Message::DlCancel),
+    ]
+    .spacing(6);
+
+    let summary = ar(
+        format!(
+            "{}: {total} ({}) — {}: {sel_count} ({})",
+            tr(lang, "files_word"),
+            fmt_size(all_size),
+            tr(lang, "selected_word"),
+            fmt_size(sel_size),
+        ),
+        13.0,
+    );
+
+    let done = state.dl_queue.iter().filter(|job| job.done).count();
+    let queue_header = row![
+        ar(tr(lang, "dl_queue"), 15.0),
+        ar(format!("{done}/{}", state.dl_queue.len()), 13.0),
+        Space::with_width(Length::Fill),
+        button(ar_boxed(tr(lang, "clear_finished"), 12.0)).on_press(Message::DlClearFinished),
+        button(ar_boxed(tr(lang, "open_folder"), 12.0)).on_press(Message::DlOpenFolder),
+    ]
+    .spacing(6);
+
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if state.dl_queue.is_empty() {
-        rows.push(ar_boxed(tr(state.lang, "no_downloads"), 15.0));
+        rows.push(ar_boxed(tr(lang, "no_downloads"), 15.0));
     }
     for job in &state.dl_queue {
         let status = if let Some(err) = &job.failed {
@@ -3473,32 +3768,38 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         let mut actions: Vec<Element<'_, Message>> = Vec::new();
         if job.failed.is_some() {
             actions.push(
-                button(ar_boxed(tr(state.lang, "retry"), 13.0))
+                button(ar_boxed(tr(lang, "retry"), 13.0))
                     .on_press(Message::DlRetry(job.id))
                     .into(),
             );
             actions.push(
-                button(ar_boxed(tr(state.lang, "remove"), 13.0))
+                button(ar_boxed(tr(lang, "remove"), 13.0))
                     .on_press(Message::DlRemove(job.id))
                     .into(),
             );
         } else if job.done {
             actions.push(
-                button(ar_boxed(tr(state.lang, "remove"), 13.0))
+                button(ar_boxed(tr(lang, "remove"), 13.0))
                     .on_press(Message::DlRemove(job.id))
                     .into(),
             );
         } else {
             actions.push(
-                button(ar_boxed(tr(state.lang, "cancel"), 13.0))
+                button(ar_boxed(tr(lang, "cancel"), 13.0))
                     .on_press(Message::DlCancel)
                     .into(),
             );
         }
+        let kind = if matches!(job.after, AfterDl::ImportArchive) {
+            tr(lang, "kind_pack")
+        } else {
+            tr(lang, "kind_book")
+        };
         rows.push(
             column![
                 row![
                     ar(job.label.clone(), 15.0),
+                    ar(kind, 12.0),
                     Space::with_width(Length::Fill),
                     ar(status, 13.0),
                 ]
@@ -3510,39 +3811,53 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
             .into(),
         );
     }
-    let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(220.0));
+    let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(170.0));
+
+    let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
+        .on_input(Message::DlFilterInput)
+        .padding(6)
+        .width(Length::Fixed(220.0));
+    let files_header = row![
+        ar(
+            format!(
+                "{} — {} {}/{}",
+                tr(lang, "files_of"),
+                tr(lang, "shown_of"),
+                visible.len(),
+                total
+            ),
+            13.0,
+        ),
+        Space::with_width(Length::Fill),
+        filter,
+    ]
+    .spacing(6);
     let mut files: Vec<Element<'_, Message>> = Vec::new();
-    for file in state.dl_files.iter().take(40) {
-        let megabytes = file.size as f64 / 1_048_576.0;
-        let label = format!("{} ({megabytes:.1} MB)", file.name);
-        files.push(
-            row![
-                ar(label, 13.0),
-                Space::with_width(Length::Fill),
-                button(ar_boxed(tr(state.lang, "downloads"), 12.0))
-                    .on_press(Message::DownloadFile(file.name.clone())),
-            ]
-            .spacing(4)
-            .into(),
-        );
+    for file in visible.iter().take(MODAL_FILE_ROWS) {
+        files.push(file_row(state, file));
     }
-    let item_section: Element<'_, Message> = if files.is_empty() {
-        Space::with_height(Length::Fixed(0.0)).into()
-    } else {
-        column![
-            ar(format!("archive.org: {}", state.dl_id), 14.0),
-            scrollable(column(files).spacing(4)).height(Length::Fixed(120.0)),
-        ]
-        .spacing(4)
-        .into()
-    };
-    let body = column![title, controls, list, item_section]
-        .spacing(10)
-        .padding(4)
-        .width(Length::Fixed(560.0));
+    if files.is_empty() {
+        files.push(ar_boxed(tr(lang, "no_files"), 14.0));
+    }
+    let file_list = scrollable(column(files).spacing(4)).height(Length::Fixed(170.0));
+
+    let body = column![
+        title,
+        source_row,
+        presets,
+        controls,
+        summary,
+        queue_header,
+        list,
+        files_header,
+        file_list,
+    ]
+    .spacing(8)
+    .padding(4)
+    .width(Length::Fixed(640.0));
     let card = container(body)
         .padding(18)
-        .width(Length::Fixed(600.0))
+        .width(Length::Fixed(700.0))
         .style(popup_card_style(dark));
     modal_shell(card)
 }
