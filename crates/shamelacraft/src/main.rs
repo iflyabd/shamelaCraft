@@ -307,6 +307,7 @@ struct QueueItem {
     dest: PathBuf,
     after: AfterDl,
     progress: Arc<shamela_import::download::DlProgress>,
+    started: bool,
     done: bool,
     failed: Option<String>,
 }
@@ -1169,6 +1170,7 @@ fn enqueue(state: &mut State, label: String, url: String, dest: PathBuf, after: 
         dest,
         after,
         progress: shamela_import::download::DlProgress::shared(),
+        started: false,
         done: false,
         failed: None,
     });
@@ -1176,19 +1178,24 @@ fn enqueue(state: &mut State, label: String, url: String, dest: PathBuf, after: 
 }
 
 /// Start the first queued job when no job is active.
+///
+/// `started` is set before the worker is spawned; polling the byte counter
+/// instead would leave a window in which a second worker truncates and
+/// rewrites the same file while the first one is already running.
 fn start_next(state: &mut State) {
     if state
         .dl_queue
         .iter()
-        .any(|job| !job.done && job.failed.is_none() && started(job))
+        .any(|job| job.started && !job.done && job.failed.is_none())
     {
         return;
     }
     if let Some(job) = state
         .dl_queue
         .iter_mut()
-        .find(|job| !job.done && job.failed.is_none() && !started(job))
+        .find(|job| !job.started && !job.done && job.failed.is_none())
     {
+        job.started = true;
         let url = job.url.clone();
         let dest = job.dest.clone();
         let prog = job.progress.clone();
@@ -1196,17 +1203,19 @@ fn start_next(state: &mut State) {
     }
 }
 
-fn started(job: &QueueItem) -> bool {
-    use std::sync::atomic::Ordering;
-    job.progress.written.load(Ordering::SeqCst) > 0 || job.progress.finished.load(Ordering::SeqCst)
-}
-
 /// Anything still to do?
 fn dl_active(state: &State) -> bool {
     state
         .dl_queue
         .iter()
-        .any(|job| !job.done && job.failed.is_none())
+        .any(|job| job.started && !job.done && job.failed.is_none())
+}
+
+/// Mark a queue job failed and report it in the status bar.
+fn fail_job(state: &mut State, index: usize, message: String) {
+    state.status = format!("download failed: {message}");
+    state.dl_queue[index].failed = Some(message);
+    state.dl_queue[index].done = true;
 }
 
 /// Poll worker threads; finalize finished jobs (import/convert).
@@ -1237,8 +1246,20 @@ fn finalize_download(state: &mut State, id: usize) {
         .ok()
         .and_then(|guard| guard.clone())
     {
-        state.dl_queue[index].failed = Some(err);
-        state.dl_queue[index].done = true;
+        fail_job(state, index, err);
+        return;
+    }
+    let written = state.dl_queue[index]
+        .progress
+        .written
+        .load(Ordering::SeqCst);
+    let total = state.dl_queue[index].progress.total.load(Ordering::SeqCst);
+    if total > 0 && written < total {
+        fail_job(
+            state,
+            index,
+            format!("incomplete download: {written}/{total} bytes"),
+        );
         return;
     }
     let (dest, after, url) = {
@@ -1267,14 +1288,12 @@ fn finalize_download(state: &mut State, id: usize) {
                             open_imported_db(state, &out, title, book_id, Some(url));
                         }
                         Err(err) => {
-                            state.dl_queue[index].failed = Some(format!("convert failed: {err}"));
-                            state.dl_queue[index].done = true;
+                            fail_job(state, index, format!("convert failed: {err}"));
                         }
                     }
                 }
                 Err(err) => {
-                    state.dl_queue[index].failed = Some(format!("BOK read failed: {err}"));
-                    state.dl_queue[index].done = true;
+                    fail_job(state, index, format!("BOK read failed: {err}"));
                 }
             }
         }
@@ -1290,12 +1309,10 @@ fn finalize_download(state: &mut State, id: usize) {
                     import_bok_list(state, &boks, &url);
                 }
                 Ok(_) => {
-                    state.dl_queue[index].failed = Some(String::from("no .bok inside"));
-                    state.dl_queue[index].done = true;
+                    fail_job(state, index, String::from("no .bok inside"));
                 }
                 Err(err) => {
-                    state.dl_queue[index].failed = Some(format!("extract failed: {err}"));
-                    state.dl_queue[index].done = true;
+                    fail_job(state, index, format!("extract failed: {err}"));
                 }
             }
         }
@@ -1543,17 +1560,27 @@ fn download_current(state: &mut State) {
 
 fn cancel_all(state: &mut State) {
     use std::sync::atomic::Ordering;
-    let mut count = 0;
-    for job in &mut state.dl_queue {
-        if !job.done && job.failed.is_none() {
+    let mut stopping = 0;
+    let mut pending = Vec::new();
+    for (index, job) in state.dl_queue.iter_mut().enumerate() {
+        if job.done || job.failed.is_some() {
+            continue;
+        }
+        if job.started {
             job.progress.cancel.store(true, Ordering::SeqCst);
-            count += 1;
+            stopping += 1;
+        } else {
+            pending.push(index);
         }
     }
-    state.status = if count == 0 {
+    let cancelled = pending.len();
+    for index in pending {
+        fail_job(state, index, String::from("cancelled"));
+    }
+    state.status = if stopping == 0 && cancelled == 0 {
         String::from("nothing to stop")
     } else {
-        format!("stopping {count} download(s)")
+        format!("stopping {stopping} download(s), cleared {cancelled} pending")
     };
 }
 
@@ -1582,6 +1609,7 @@ fn retry_job(state: &mut State, id: usize) {
             *slot = None;
         }
         job.failed = None;
+        job.started = false;
         job.done = false;
     }
     start_next(state);
@@ -2842,7 +2870,8 @@ fn file_row(
     let selected = state.dl_selected.contains(&file.name);
     row![
         button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
-            .on_press(Message::DlToggleFile(file.name.clone())),
+            .on_press(Message::DlToggleFile(file.name.clone()))
+            .style(button::text),
         button(ar_boxed(tr(state.lang, "download"), 12.0))
             .on_press(Message::DownloadFile(file.name.clone())),
         ar_boxed(fmt_size(file.size), 12.0),
@@ -2864,7 +2893,8 @@ fn file_row_panel(
     let label = format!("{} ({})", display_name(&file.name), fmt_size(file.size));
     row![
         button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
-            .on_press(Message::DlToggleFile(file.name.clone())),
+            .on_press(Message::DlToggleFile(file.name.clone()))
+            .style(button::text),
         button(ar_boxed(tr(state.lang, "download"), 12.0))
             .on_press(Message::DownloadFile(file.name.clone())),
         list_row(
@@ -2916,6 +2946,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
         fetch.into(),
         actions.into(),
         actions2.into(),
+        ar(tr(lang, "filter_word"), item_size(state.font_size) - 2.0),
         filter.into(),
     ];
     let visible = visible_files(state);
@@ -3854,6 +3885,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         .width(Length::Fixed(220.0));
     let files_header = row![
         filter,
+        ar_boxed(tr(lang, "filter_word"), 12.0),
         Space::with_width(Length::Fill),
         ar_boxed(
             format!(
