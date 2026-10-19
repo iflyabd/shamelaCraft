@@ -363,6 +363,7 @@ struct State {
     reopen_last: bool,
     search_opts: NormalizeOptions,
     control_files: Vec<(String, u64)>,
+    author_names: std::collections::HashMap<i64, String>,
     target_lang: String,
     dl_id: String,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
@@ -426,6 +427,7 @@ impl Default for State {
             reopen_last: true,
             search_opts: NormalizeOptions::default(),
             control_files: Vec::new(),
+            author_names: std::collections::HashMap::new(),
             target_lang: String::from("en"),
             dl_id: String::from("mutunulhadith"),
             dl_queue: Vec::new(),
@@ -869,7 +871,10 @@ fn open_database_path(state: &mut State, preset: Option<PathBuf>) {
             match (lib.counts(), build_index(&lib)) {
                 (Ok(counts), Ok(index)) => {
                     remember_db(&path);
+                    let author_names: std::collections::HashMap<i64, String> =
+                        lib.author_names().unwrap_or_default().into_iter().collect();
                     state.lib = Some(lib);
+                    state.author_names = author_names;
                     state.index = Some(index);
                     state.categories = state
                         .lib
@@ -2877,6 +2882,47 @@ fn tool_bar(state: &State) -> Element<'_, Message> {
     column![row_one, row_two].into()
 }
 
+/// Short author line for a book row (ids resolved through the library).
+fn author_line(state: &State, authors: &str) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for id in authors.split(',') {
+        let Ok(id) = id.trim().parse::<i64>() else {
+            continue;
+        };
+        let Some(name) = state.author_names.get(&id) else {
+            continue;
+        };
+        names.push(name.as_str());
+        if names.len() == 2 {
+            break;
+        }
+    }
+    names.join(" • ")
+}
+
+/// Book row: title with a smaller author line underneath.
+fn book_row<'a>(state: &'a State, book: &Book) -> Element<'a, Message> {
+    let size = item_size(state.font_size);
+    let authors = author_line(state, &book.authors);
+    let mut lines = column![ar(book.name.clone(), size)]
+        .spacing(1)
+        .width(Length::Fill);
+    if !authors.is_empty() {
+        lines = lines.push(
+            text(authors)
+                .font(AMIRI)
+                .size(size - 3.0)
+                .shaping(Shaping::Advanced),
+        );
+    }
+    button(lines)
+        .on_press(Message::BookOpened(book.id))
+        .width(Length::Fill)
+        .padding(5)
+        .style(button::text)
+        .into()
+}
+
 fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message> {
     if books.is_empty() {
         return ar(tr(state.lang, "no_results"), state.font_size);
@@ -2884,15 +2930,7 @@ fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message>
     let items: Vec<Element<'static, Message>> = books
         .iter()
         .take(200)
-        .map(|book| {
-            list_row(
-                book.name.clone(),
-                false,
-                Message::BookOpened(book.id),
-                item_size(state.font_size),
-                state.chrome(),
-            )
-        })
+        .map(|book| book_row(state, book))
         .collect();
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
@@ -3106,13 +3144,7 @@ fn books_panel(state: &State) -> Element<'_, Message> {
         items.push(ar(hint, item_size(state.font_size)));
     }
     for book in state.books.iter().take(200) {
-        items.push(list_row(
-            book.name.clone(),
-            false,
-            Message::BookOpened(book.id),
-            item_size(state.font_size),
-            state.chrome(),
-        ));
+        items.push(book_row(state, book));
     }
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
@@ -3150,6 +3182,56 @@ fn control_panel(state: &State) -> Element<'_, Message> {
     scrollable(column(items).spacing(4))
         .height(Length::Fill)
         .into()
+}
+
+/// First (sura, aya) of each of the 30 juz of the Madani mushaf.
+const JUZ_STARTS: [(i64, i64); 30] = [
+    (1, 1),
+    (2, 142),
+    (2, 253),
+    (3, 92),
+    (4, 24),
+    (4, 148),
+    (5, 82),
+    (6, 111),
+    (7, 88),
+    (8, 41),
+    (9, 93),
+    (11, 6),
+    (12, 53),
+    (15, 1),
+    (17, 1),
+    (18, 75),
+    (21, 1),
+    (23, 1),
+    (25, 21),
+    (27, 56),
+    (29, 46),
+    (33, 31),
+    (36, 28),
+    (39, 32),
+    (41, 47),
+    (46, 1),
+    (51, 31),
+    (58, 1),
+    (67, 1),
+    (78, 1),
+];
+
+/// Juz number containing the opening of a sura.
+fn juz_of_sura(sura: i64) -> i64 {
+    JUZ_STARTS
+        .iter()
+        .rposition(|&(start, _)| start <= sura)
+        .map_or(1, |index| index as i64 + 1)
+}
+
+/// Juz number when the given sura opens a new juz.
+fn juz_starting_at(sura: i64) -> Option<i64> {
+    JUZ_STARTS
+        .iter()
+        .position(|&(start, _)| start == sura)
+        .map(|index| index as i64 + 1)
 }
 
 fn quran_panel(state: &State) -> Element<'_, Message> {
@@ -3192,21 +3274,28 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
         .height(Length::Fill)
         .into();
     }
-    let suras: Vec<Element<'_, Message>> = shamela_content::quran::SURA_NAMES
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            let id = index as i64 + 1;
-            let label = format!("{id}. {name}");
-            list_row(
-                label,
-                id == state.quran_sura,
-                Message::QuranSura(id),
-                13.0,
-                state.chrome(),
-            )
-        })
-        .collect();
+    let mut suras: Vec<Element<'_, Message>> = Vec::new();
+    for (index, name) in shamela_content::quran::SURA_NAMES.iter().enumerate() {
+        let id = index as i64 + 1;
+        if let Some(juz) = juz_starting_at(id) {
+            suras.push(
+                container(ar_boxed(
+                    format!("{} {juz}", tr(state.lang, "juz_word")),
+                    12.0,
+                ))
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .into(),
+            );
+        }
+        suras.push(list_row(
+            format!("{id}. {name}"),
+            id == state.quran_sura,
+            Message::QuranSura(id),
+            13.0,
+            state.chrome(),
+        ));
+    }
     column![
         search,
         scrollable(column(suras).spacing(2)).height(Length::Fill)
@@ -3214,6 +3303,45 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     .spacing(8)
     .height(Length::Fill)
     .into()
+}
+
+/// Bottom tabs of the side pane.
+fn panel_tabs(state: &State) -> Element<'_, Message> {
+    let accent = state.accent.color();
+    let radius = state.chrome().radius;
+    let tabs = [
+        ("tree", ("Library", "الأقسام"), Panel::Library),
+        ("authors", ("Authors", "المؤلفون"), Panel::Authors),
+        ("bkmrk", ("Bookmarks", "الإشارات"), Panel::Bookmarks),
+        ("dipquran", ("Quran", "القرآن"), Panel::Quran),
+        ("globe", ("Downloads", "التحميل"), Panel::Downloads),
+        ("ctr", ("Control room", "غرفة التحكم"), Panel::Control),
+    ];
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    for (icon, tip, panel) in tabs {
+        let active = state.panel == panel;
+        let label = format!("{} / {}", tip.0, tip.1);
+        items.push(
+            Tooltip::new(
+                button(ticon(icon, 18.0))
+                    .on_press(Message::PanelSelected(panel))
+                    .padding(4)
+                    .style(move |theme: &Theme, status: button::Status| {
+                        if active {
+                            accent_style(accent, radius)(theme, status)
+                        } else {
+                            button::text(theme, status)
+                        }
+                    }),
+                ar(label, 13.0),
+                Position::Bottom,
+            )
+            .into(),
+        );
+    }
+    items.reverse();
+    items.insert(0, Space::with_width(Length::Fill).into());
+    row(items).spacing(2).into()
 }
 
 fn sidebar(state: &State) -> Element<'_, Message> {
@@ -3510,7 +3638,12 @@ fn reader(state: &State) -> Element<'_, Message> {
                     let name = shamela_content::quran::SURA_NAMES
                         .get(*sura as usize - 1)
                         .unwrap_or(&"?");
-                    let head = format!("{name} ({})", verses.len());
+                    let head = format!(
+                        "{name} — {} {} ({})",
+                        tr(state.lang, "juz_word"),
+                        juz_of_sura(*sura),
+                        verses.len()
+                    );
                     let tafsir_label = shamela_import::tafsir_dl::TAFSIRS
                         [state.tafsir_ix % shamela_import::tafsir_dl::TAFSIRS.len()]
                     .1;
@@ -4401,11 +4534,12 @@ fn view(state: &State) -> Element<'_, Message> {
                 PaneKind::Reader => reader(state),
                 PaneKind::Books => books_panel(state),
                 PaneKind::Side => {
-                    if quran_active(state) {
+                    let body = if quran_active(state) {
                         quran_panel(state)
                     } else {
                         sidebar(state)
-                    }
+                    };
+                    column![body, panel_tabs(state)].spacing(4).into()
                 }
             })
         })

@@ -175,6 +175,15 @@ impl Library {
         rows.collect()
     }
 
+    /// Every author id with its display name (for compact book sub-lines).
+    pub fn author_names(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT author_id, author_name FROM author")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     /// All books of one author (main or co-author), in catalog order.
     pub fn books_of_author(&self, author_id: i64) -> Result<Vec<Book>> {
         let sql = format!(
