@@ -3176,6 +3176,7 @@ fn file_row_panel(
 fn downloads_panel(state: &State) -> Element<'_, Message> {
     let lang = state.lang;
     let input = text_input(tr(lang, "source_hint"), state.dl_id.as_str())
+        .font(AMIRI)
         .on_input(Message::DownloadIdInput)
         .on_submit(Message::DownloadList)
         .padding(8);
@@ -3201,6 +3202,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
     ]
     .spacing(4);
     let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
+        .font(AMIRI)
         .on_input(Message::DlFilterInput)
         .padding(6);
     let mut items: Vec<Element<'_, Message>> = vec![
@@ -3343,6 +3345,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
         .into();
     }
     let search = text_input(tr(state.lang, "quran_search"), state.quran_query.as_str())
+        .font(AMIRI)
         .on_input(Message::QuranSearch)
         .padding(8);
     if !state.quran_results.is_empty() {
@@ -3451,6 +3454,7 @@ fn sidebar(state: &State) -> Element<'_, Message> {
     let show_search = matches!(state.panel, Panel::Library | Panel::Authors);
     let search: Element<'_, Message> = if show_search {
         text_input(tr(state.lang, "search_hint"), state.query.as_str())
+            .font(AMIRI)
             .on_input(Message::SearchInput)
             .padding(8)
             .into()
@@ -3597,6 +3601,7 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
     note_items.push(
         row![
             text_input(tr(state.lang, "note_hint"), state.note_input.as_str())
+                .font(AMIRI)
                 .on_input(Message::NoteInput)
                 .padding(6)
                 .width(Length::Fill),
@@ -3639,6 +3644,7 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
             button(ticon("next", 16.0)).on_press(Message::FindNext),
             button(ticon("prev", 16.0)).on_press(Message::FindPrev),
             text_input(tr(state.lang, "find_in_book"), state.find_input.as_str())
+                .font(AMIRI)
                 .on_input(Message::FindInput)
                 .on_submit(Message::FindNext)
                 .padding(6),
@@ -4180,6 +4186,7 @@ fn goto_modal(state: &State) -> Element<'_, Message> {
         format!("1 .. {pages}")
     };
     let input = text_input(tr(lang, "page_word"), state.goto_input.as_str())
+        .font(AMIRI)
         .on_input(Message::GoToInput)
         .on_submit(Message::GoToSubmit)
         .padding(8);
@@ -4426,6 +4433,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     .spacing(8);
 
     let input = text_input(tr(lang, "source_hint"), state.dl_id.as_str())
+        .font(AMIRI)
         .on_input(Message::DownloadIdInput)
         .on_submit(Message::DownloadList)
         .padding(8);
@@ -4453,6 +4461,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     let presets = column(preset_rows).spacing(4);
 
     let archive_search = text_input(tr(lang, "archive_search_hint"), state.dl_query.as_str())
+        .font(AMIRI)
         .on_input(Message::DlQueryInput)
         .on_submit(Message::DlSearch)
         .padding(7);
@@ -4570,6 +4579,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     let (files_header, file_list): (Element<'_, Message>, Element<'_, Message>) =
         if state.dl_results.is_empty() {
             let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
+                .font(AMIRI)
                 .on_input(Message::DlFilterInput)
                 .padding(6)
                 .width(Length::Fixed(220.0));
