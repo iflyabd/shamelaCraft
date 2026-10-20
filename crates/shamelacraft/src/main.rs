@@ -559,7 +559,7 @@ fn list_row(
     size: f32,
     chrome: Chrome,
 ) -> Element<'static, Message> {
-    let content = button(ar(label, size))
+    let content = button(container(ar(label, size)).width(Length::Fill))
         .on_press(msg)
         .width(Length::Fill)
         .padding(6);
@@ -2932,7 +2932,8 @@ fn book_buttons<'a>(state: &'a State, books: &'a [Book]) -> Element<'a, Message>
         .take(200)
         .map(|book| book_row(state, book))
         .collect();
-    scrollable(column(items).spacing(4))
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -2949,7 +2950,8 @@ fn library_tree(state: &State) -> Element<'_, Message> {
             state.chrome(),
         ));
     }
-    scrollable(column(items).spacing(4))
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -2982,7 +2984,8 @@ fn authors_panel(state: &State) -> Element<'_, Message> {
             state.chrome(),
         ));
     }
-    scrollable(column(items).spacing(4))
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -3009,7 +3012,8 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
             .into()
         })
         .collect();
-    scrollable(column(items).spacing(4))
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -3146,7 +3150,8 @@ fn books_panel(state: &State) -> Element<'_, Message> {
     for book in state.books.iter().take(200) {
         items.push(book_row(state, book));
     }
-    scrollable(column(items).spacing(4))
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -3176,10 +3181,12 @@ fn control_panel(state: &State) -> Element<'_, Message> {
                 button(ticon("x", 16.0)).on_press(Message::DeleteBook(name.clone())),
             ]
             .spacing(4)
+            .width(Length::Fill)
             .into(),
         );
     }
-    scrollable(column(items).spacing(4))
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -3218,20 +3225,12 @@ const JUZ_STARTS: [(i64, i64); 30] = [
     (78, 1),
 ];
 
-/// Juz number containing the opening of a sura.
+/// Juz number containing the opening verse of a sura.
 fn juz_of_sura(sura: i64) -> i64 {
     JUZ_STARTS
         .iter()
-        .rposition(|&(start, _)| start <= sura)
+        .rposition(|&(start, aya)| start < sura || (start == sura && aya <= 1))
         .map_or(1, |index| index as i64 + 1)
-}
-
-/// Juz number when the given sura opens a new juz.
-fn juz_starting_at(sura: i64) -> Option<i64> {
-    JUZ_STARTS
-        .iter()
-        .position(|&(start, _)| start == sura)
-        .map(|index| index as i64 + 1)
 }
 
 fn quran_panel(state: &State) -> Element<'_, Message> {
@@ -3277,15 +3276,21 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     let mut suras: Vec<Element<'_, Message>> = Vec::new();
     for (index, name) in shamela_content::quran::SURA_NAMES.iter().enumerate() {
         let id = index as i64 + 1;
-        if let Some(juz) = juz_starting_at(id) {
+        for (juz_index, &(start, aya)) in JUZ_STARTS.iter().enumerate() {
+            if start != id {
+                continue;
+            }
+            let juz = juz_index as i64 + 1;
+            let label = if aya <= 1 {
+                format!("{} {juz}", tr(state.lang, "juz_word"))
+            } else {
+                format!("{} {juz} — {aya}", tr(state.lang, "juz_word"))
+            };
             suras.push(
-                container(ar_boxed(
-                    format!("{} {juz}", tr(state.lang, "juz_word")),
-                    12.0,
-                ))
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .into(),
+                container(ar_boxed(label, 12.0))
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End)
+                    .into(),
             );
         }
         suras.push(list_row(
@@ -3298,7 +3303,9 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     }
     column![
         search,
-        scrollable(column(suras).spacing(2)).height(Length::Fill)
+        scrollable(column(suras).spacing(2).width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
     ]
     .spacing(8)
     .height(Length::Fill)
@@ -3525,19 +3532,24 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         } else {
             format!("{} / {hits}", state.find_pos + 1)
         };
-        let mut bar = column![row![
-            ar_boxed(tr(state.lang, "find_word"), 12.0),
+        let head = row![
+            button(ticon("x", 14.0)).on_press(Message::FindClose),
+            Space::with_width(Length::Fill),
+            ar_boxed(tr(state.lang, "find_book"), 13.0),
+        ]
+        .width(Length::Fill);
+        let line = row![
+            ar_boxed(counter, 13.0),
+            button(ticon("next", 16.0)).on_press(Message::FindNext),
+            button(ticon("prev", 16.0)).on_press(Message::FindPrev),
             text_input(tr(state.lang, "find_in_book"), state.find_input.as_str())
                 .on_input(Message::FindInput)
                 .on_submit(Message::FindNext)
                 .padding(6),
-            button(ticon("prev", 16.0)).on_press(Message::FindPrev),
-            button(ticon("next", 16.0)).on_press(Message::FindNext),
-            ar_boxed(counter, 13.0),
-            button(ticon("x", 14.0)).on_press(Message::FindClose),
         ]
-        .spacing(6)]
-        .spacing(4);
+        .spacing(6)
+        .width(Length::Fill);
+        let mut bar = column![head, line].spacing(4);
         let snippet = find_snippet(state);
         if !snippet.is_empty() {
             bar = bar.push(ar(snippet, 12.0));
