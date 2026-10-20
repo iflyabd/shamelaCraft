@@ -18,12 +18,14 @@ Lightweight, open-source Arabic library reader in pure Rust.
   Android `.mdb` (`book` + `title` tables) and `.mbok` (SQLite), with
   full-text reader tabs, page navigation, and TOC jumping
 - **Download manager**: a categorized keyless source catalog for archive.org
-  (Shamela PC/Android/MBOK libraries, 25+ entries and 8,000+ books), a pasted
-  item URL, **deep pack browsing** (list and fetch one book from a ZIP/RAR
-  without downloading the whole collection), per-file / multi-select /
+  (Shamela PC/Android/MBOK libraries, 26 curated entries and 26,000+ books), a
+  pasted item URL, **deep pack browsing** (list and fetch one book from a
+  ZIP/RAR without downloading the whole collection), per-file / multi-select /
   whole-item downloads, per-book download by title, open-book re-download,
   name filter, size/kind badges, live progress, queue summary, cancel, retry
-  and remove. ZIP / TAR / TAR.GZ / RAR / **7z** are extracted locally.
+  and remove. ZIP / TAR / TAR.GZ / RAR / **7z** are extracted locally. Split
+  RAR sets can be browsed, but archive.org only extracts inner books from the
+  first volume; later volumes return 503 for individual files.
 - **One unified reading pane** for imported books and the Uthmani Quran
 - **Quran tab** with the sura index replacing the library tree, plus nine
   keyless Arabic tafsirs cached locally

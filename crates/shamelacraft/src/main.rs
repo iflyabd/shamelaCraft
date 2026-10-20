@@ -3369,7 +3369,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "shamela-hesham",
         label: "شاملة هشام ٤/٧",
         archive: Some("shamela-hesham.part04.rar"),
-        count: "—",
+        count: "٢٤٢٨",
         format: "MDB",
         note: "RAR ٩٥٤MB",
         group: "مكتبات MDB للجوال",
@@ -3378,7 +3378,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "shamela-hesham",
         label: "شاملة هشام ٥/٧",
         archive: Some("shamela-hesham.part05.rar"),
-        count: "—",
+        count: "٣١٠٣",
         format: "MDB",
         note: "RAR ٩٥٤MB",
         group: "مكتبات MDB للجوال",
@@ -3387,7 +3387,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "shamela-hesham",
         label: "شاملة هشام ٦/٧",
         archive: Some("shamela-hesham.part06.rar"),
-        count: "—",
+        count: "٣٤٣١",
         format: "MDB",
         note: "RAR ٩٥٤MB",
         group: "مكتبات MDB للجوال",
@@ -3477,7 +3477,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "Shamela_android",
         label: "شاملة أندرويد ٤/٥",
         archive: Some("shamela.part04.rar"),
-        count: "—",
+        count: "١٠٣",
         format: "MBOK",
         note: "RAR ١٠٠MB",
         group: "مكتبات MBOK (SQLite)",
@@ -3486,7 +3486,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "Shamela_android",
         label: "شاملة أندرويد ٥/٥",
         archive: Some("shamela.part05.rar"),
-        count: "—",
+        count: "٨٢",
         format: "MBOK",
         note: "RAR ٣٢MB",
         group: "مكتبات MBOK (SQLite)",
@@ -3498,37 +3498,49 @@ const DL_PRESETS: &[DlSource] = &[
 const MAX_QUEUE_BATCH: usize = 500;
 const MAX_RENDER_FILES: usize = 400;
 
-/// One curated source row in the catalog.
+/// One curated source row in the catalog: fixed open button, then a
+/// two-line description so long labels and notes do not squeeze it.
 fn source_row(state: &State, index: usize) -> Element<'static, Message> {
     let source = &DL_PRESETS[index];
-    let note: Element<'static, Message> = if source.note.is_empty() {
-        Space::with_width(0).into()
-    } else {
-        ar_boxed(source.note, 10.0)
-    };
-    row![
-        button(ar_boxed(tr(state.lang, "open"), 11.0)).on_press(Message::DlPresetSource(index)),
-        ar_boxed(source.format, 10.0),
-        ar_boxed(source.count, 11.0),
-        Space::with_width(Length::Fill),
-        ar_boxed(trim_text(source.label, 36), 12.0),
-        note,
+    let mut meta = format!("{} · {}", source.format, source.count);
+    if !source.note.is_empty() {
+        meta.push_str(" · ");
+        meta.push_str(source.note);
+    }
+    let details = column![
+        ar_boxed(trim_text(source.label, 46), 13.0),
+        ar_boxed(meta, 10.0),
     ]
-    .spacing(5)
+    .spacing(1)
+    .width(Length::Fill);
+    row![
+        button(ar_boxed(tr(state.lang, "open"), 11.0))
+            .on_press(Message::DlPresetSource(index))
+            .width(Length::Fixed(62.0)),
+        details,
+    ]
+    .spacing(6)
     .width(Length::Fill)
     .into()
 }
 
-/// Narrow source row for the side panel (no long size note).
+/// Narrow source row for the side panel: a fixed open button and a
+/// two-line label, so the button never steals room from the title.
 fn source_row_panel(state: &State, index: usize) -> Element<'static, Message> {
     let source = &DL_PRESETS[index];
-    row![
-        button(ar_boxed(tr(state.lang, "open"), 11.0)).on_press(Message::DlPresetSource(index)),
-        ar_boxed(format!("{} · {}", source.format, source.count), 10.0),
-        Space::with_width(Length::Fill),
+    let details = column![
+        ar_boxed(format!("{} · {}", source.format, source.count), 9.0),
         ar_boxed(trim_text(source.label, 26), 12.0),
     ]
-    .spacing(4)
+    .spacing(0)
+    .width(Length::Fill);
+    row![
+        button(ar_boxed(tr(state.lang, "open"), 11.0))
+            .on_press(Message::DlPresetSource(index))
+            .width(Length::Fixed(54.0)),
+        details,
+    ]
+    .spacing(6)
     .width(Length::Fill)
     .into()
 }
@@ -3544,8 +3556,8 @@ fn source_list(state: &State) -> Element<'static, Message> {
         }
         items.push(source_row(state, index));
     }
-    scrollable(column(items).spacing(3))
-        .height(Length::Fixed(145.0))
+    scrollable(column(items).spacing(4))
+        .height(Length::Fixed(185.0))
         .into()
 }
 
@@ -3676,6 +3688,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
             items.push(source_row_panel(state, index));
         }
         return scrollable(column(items).spacing(5))
+            .id(iced::widget::scrollable::Id::new("dl_sources_panel"))
             .height(Length::Fill)
             .into();
     }
@@ -3714,6 +3727,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
                 .into(),
         );
         return scrollable(column(items).spacing(5))
+            .id(iced::widget::scrollable::Id::new("dl_results_panel"))
             .height(Length::Fill)
             .into();
     }
@@ -3721,14 +3735,17 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
     if !state.dl_archive.is_empty() {
         items.push(
             row![
-                button(ar_boxed(tr(lang, "back_to_pack"), 11.0)).on_press(Message::DlBackArchive),
+                button(ar_boxed(tr(lang, "back_to_pack"), 11.0))
+                    .on_press(Message::DlBackArchive)
+                    .width(Length::Fixed(76.0)),
                 Space::with_width(Length::Fill),
-                ar(
+                ar_boxed(
                     trim_text(&state.dl_archive, 20),
-                    item_size(state.font_size) - 4.0
+                    item_size(state.font_size) - 5.0
                 ),
             ]
             .spacing(4)
+            .width(Length::Fill)
             .into(),
         );
     }
@@ -3765,7 +3782,13 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
             item_size(state.font_size) - 4.0,
         ));
     }
+    let scroll_id = if state.dl_archive.is_empty() {
+        "dl_files_panel"
+    } else {
+        "dl_open_pack_panel"
+    };
     scrollable(column(items).spacing(6))
+        .id(iced::widget::scrollable::Id::new(scroll_id))
         .height(Length::Fill)
         .into()
 }

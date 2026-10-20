@@ -230,7 +230,11 @@ fn clean_title(raw: &str) -> String {
 fn fallback_title(first_page: &str, path: &Path) -> String {
     let line = first_page
         .lines()
-        .map(|line| line.trim().trim_matches('_').trim())
+        .map(|line| {
+            line.trim().trim_matches(|ch: char| {
+                ch.is_whitespace() || matches!(ch, '_' | 'ـ' | '[' | ']' | '«' | '»')
+            })
+        })
         .find(|line| line.chars().count() >= 3)
         .unwrap_or("");
     if line.is_empty() {
@@ -365,13 +369,23 @@ fn open_mobile_mdb(reader: &mut PageReader, path: &Path, legacy: bool) -> Result
     }
 
     let first_page = pages.first().map(|page| page.text.as_str()).unwrap_or("");
-    let title = toc
-        .iter()
-        .find(|heading| heading.level == 1)
-        .or_else(|| toc.first())
-        .map(|heading| heading.heading.clone())
-        .filter(|title| !title.is_empty())
-        .unwrap_or_else(|| fallback_title(first_page, path));
+    // Some mobile libraries start with two unlabelled front-matter pages
+    // (book data + contents) before the first TOC heading. In that case the
+    // first chapter is not the book title; use the front-matter heading.
+    let front_matter = match (toc.first(), pages.first()) {
+        (Some(heading), Some(page)) => heading.page_id > page.id,
+        _ => false,
+    };
+    let title = if front_matter {
+        fallback_title(first_page, path)
+    } else {
+        toc.iter()
+            .find(|heading| heading.level == 1)
+            .or_else(|| toc.first())
+            .map(|heading| heading.heading.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| fallback_title(first_page, path))
+    };
     let id = path
         .file_stem()
         .and_then(|part| part.to_str())
