@@ -3498,50 +3498,52 @@ const DL_PRESETS: &[DlSource] = &[
 const MAX_QUEUE_BATCH: usize = 500;
 const MAX_RENDER_FILES: usize = 400;
 
-/// One curated source row in the catalog: fixed open button, then a
-/// two-line description so long labels and notes do not squeeze it.
+/// One curated source row in the catalog. The whole row is the open
+/// control, so long titles can never squeeze a separate button out of
+/// shape; the tooltip repeats the full, untrimmed label.
 fn source_row(state: &State, index: usize) -> Element<'static, Message> {
     let source = &DL_PRESETS[index];
-    let mut meta = format!("{} · {}", source.format, source.count);
+    let mut label = format!("{} — {} · {}", source.label, source.format, source.count);
     if !source.note.is_empty() {
-        meta.push_str(" · ");
-        meta.push_str(source.note);
+        label.push_str(" · ");
+        label.push_str(source.note);
     }
-    let details = column![
-        ar_boxed(trim_text(source.label, 46), 13.0),
-        ar_boxed(meta, 10.0),
-    ]
-    .spacing(1)
-    .width(Length::Fill);
-    row![
-        button(ar_boxed(tr(state.lang, "open"), 11.0))
-            .on_press(Message::DlPresetSource(index))
-            .width(Length::Fixed(62.0)),
-        details,
-    ]
-    .spacing(6)
-    .width(Length::Fill)
+    let content = list_row(
+        trim_text(&label, 68),
+        false,
+        Message::DlPresetSource(index),
+        item_size(state.font_size) - 1.0,
+        state.chrome(),
+    );
+    Tooltip::new(
+        content,
+        ar_boxed(source.label.clone(), 12.0),
+        Position::Left,
+    )
+    .gap(4)
+    .style(tooltip_style)
     .into()
 }
 
-/// Narrow source row for the side panel: a fixed open button and a
-/// two-line label, so the button never steals room from the title.
+/// Narrow variant for the side panel: one compact clickable line plus a
+/// full-label tooltip on the left (where the panel has room).
 fn source_row_panel(state: &State, index: usize) -> Element<'static, Message> {
     let source = &DL_PRESETS[index];
-    let details = column![
-        ar_boxed(format!("{} · {}", source.format, source.count), 9.0),
-        ar_boxed(trim_text(source.label, 26), 12.0),
-    ]
-    .spacing(0)
-    .width(Length::Fill);
-    row![
-        button(ar_boxed(tr(state.lang, "open"), 11.0))
-            .on_press(Message::DlPresetSource(index))
-            .width(Length::Fixed(54.0)),
-        details,
-    ]
-    .spacing(6)
-    .width(Length::Fill)
+    let label = format!("{} — {} · {}", source.label, source.format, source.count);
+    let content = list_row(
+        trim_text(&label, 34),
+        false,
+        Message::DlPresetSource(index),
+        item_size(state.font_size) - 3.0,
+        state.chrome(),
+    );
+    Tooltip::new(
+        content,
+        ar_boxed(source.label.clone(), 12.0),
+        Position::Left,
+    )
+    .gap(4)
+    .style(tooltip_style)
     .into()
 }
 
