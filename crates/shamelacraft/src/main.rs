@@ -3525,7 +3525,8 @@ fn source_row(state: &State, index: usize) -> Element<'static, Message> {
 /// full-label tooltip on the left (where the panel has room).
 fn source_row_panel(state: &State, index: usize) -> Element<'static, Message> {
     let source = &DL_PRESETS[index];
-    let label = format!("{} — {} · {}", source.label, source.format, source.count);
+    let label = format!("{} · {}", source.label, source.count);
+    let full = format!("{} — {} · {}", source.label, source.format, source.count);
     let content = list_row(
         trim_text(&label, 34),
         false,
@@ -3533,7 +3534,7 @@ fn source_row_panel(state: &State, index: usize) -> Element<'static, Message> {
         item_size(state.font_size) - 3.0,
         state.chrome(),
     );
-    Tooltip::new(content, ar_boxed(source.label, 12.0), Position::Left)
+    Tooltip::new(content, ar_boxed(full, 12.0), Position::Left)
         .gap(4)
         .style(tooltip_style)
         .into()
