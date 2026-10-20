@@ -235,6 +235,7 @@ enum Message {
     DlRetry(usize),
     DlCancel,
     DownloadCurrent,
+    DownloadTab(usize),
     DlToggleFile(String),
     DlSelectAll,
     DlSelectNone,
@@ -1571,7 +1572,13 @@ fn download_current(state: &mut State) {
         state.status = String::from("open a book first");
         return;
     };
+    download_tab(state, index);
+}
+
+/// Download (or re-download) the book of one open tab, active or not.
+fn download_tab(state: &mut State, index: usize) {
     let Some(tab) = state.tabs.get(index) else {
+        state.status = String::from("open a book first");
         return;
     };
     let title = tab.title.clone();
@@ -1621,6 +1628,7 @@ fn download_current(state: &mut State) {
     }
 
     state.status = String::from(tr(state.lang, "no_source_match"));
+    state.show_downloads = true;
 }
 
 fn cancel_all(state: &mut State) {
@@ -2336,6 +2344,7 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             };
         }
         Message::DownloadCurrent => download_current(state),
+        Message::DownloadTab(index) => download_tab(state, index),
         Message::DownloadOpen => {
             state.show_downloads = true;
         }
@@ -3622,7 +3631,7 @@ fn reader(state: &State) -> Element<'_, Message> {
         .iter()
         .enumerate()
         .map(|(index, tab)| {
-            let label: String = tab.title.chars().take(20).collect();
+            let label: String = tab.title.chars().take(18).collect();
             let active = state.active_tab == Some(index);
             let tab_button = button(ar_boxed(label, 13.0)).on_press(Message::TabSelected(index));
             let tab_button = if active {
@@ -3630,12 +3639,28 @@ fn reader(state: &State) -> Element<'_, Message> {
             } else {
                 tab_button.style(button::text)
             };
-            row![
-                tab_button,
-                button(ticon("x", 13.0)).on_press(Message::TabClosed(index)),
-            ]
-            .spacing(2)
-            .into()
+            let mut children: Vec<Element<'_, Message>> = vec![tab_button.into()];
+            // Every open book gets its own download button in its tab.
+            if !matches!(&tab.kind, TabKind::Quran { .. }) {
+                children.push(
+                    Tooltip::new(
+                        button(ticon("export", 12.0))
+                            .on_press(Message::DownloadTab(index))
+                            .padding(2)
+                            .style(button::text),
+                        ar(tr(state.lang, "download"), 12.0),
+                        Position::Bottom,
+                    )
+                    .gap(6.0)
+                    .into(),
+                );
+            }
+            children.push(
+                button(ticon("x", 13.0))
+                    .on_press(Message::TabClosed(index))
+                    .into(),
+            );
+            iced::widget::Row::with_children(children).spacing(2).into()
         })
         .collect();
     let mut tabs = tabs;
