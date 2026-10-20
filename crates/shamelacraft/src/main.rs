@@ -243,7 +243,10 @@ enum Message {
     DlFilterInput(String),
     DlClearFinished,
     DlOpenFolder,
-    DlPresetSource(String),
+    DlPresetSource(usize),
+    DlBrowseArchive(String),
+    DlBackArchive,
+    DlSourcesToggle,
     DlQueryInput(String),
     DlSearch,
     DlClearResults,
@@ -371,6 +374,8 @@ struct State {
     author_names: std::collections::HashMap<i64, String>,
     target_lang: String,
     dl_id: String,
+    dl_archive: String,
+    dl_sources: bool,
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
     dl_selected: std::collections::BTreeSet<String>,
     dl_filter: String,
@@ -437,6 +442,8 @@ impl Default for State {
             author_names: std::collections::HashMap::new(),
             target_lang: String::from("en"),
             dl_id: String::from("mutunulhadith"),
+            dl_archive: String::new(),
+            dl_sources: false,
             dl_queue: Vec::new(),
             dl_next_id: 1,
             show_downloads: false,
@@ -1098,8 +1105,11 @@ fn books_dir() -> PathBuf {
 
 fn import_bok(state: &mut State) {
     let dialog = rfd::FileDialog::new()
-        .add_filter("Shamela legacy book", &["bok", "BOK"])
-        .set_title("bok file");
+        .add_filter(
+            "Shamela book (bok/mdb/mbok)",
+            &["bok", "mdb", "mbok", "BOK", "MDB", "MBOK"],
+        )
+        .set_title("Shamela book");
     let Some(path) = dialog.pick_file() else {
         state.status = String::from("no file selected");
         return;
@@ -1118,7 +1128,7 @@ fn import_bok_file(state: &mut State, dest: &std::path::Path, stem: String) {
     let book = match shamela_import::bok::open_bok(dest) {
         Ok(book) => book,
         Err(err) => {
-            state.status = format!("BOK read failed: {err}");
+            state.status = format!("book read failed: {err}");
             return;
         }
     };
@@ -1127,9 +1137,8 @@ fn import_bok_file(state: &mut State, dest: &std::path::Path, stem: String) {
     } else {
         book.meta.title.clone()
     };
-    let book_id = book.meta.id;
     match shamela_import::convert::bok_to_book_db(&book, &out) {
-        Ok(()) => open_imported_db(state, &out, title, book_id, None),
+        Ok(()) => open_imported_db(state, &out, title, None),
         Err(err) => state.status = format!("convert failed: {err}"),
     }
 }
@@ -1170,14 +1179,25 @@ fn open_imported_pages(
     refresh_notes(state);
 }
 
+/// Stable positive id for an imported book, reserved above the master
+/// library's numeric range so notes/bookmarks never collide with it.
+fn imported_book_id(path: &std::path::Path) -> i64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in path.to_string_lossy().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    1_000_000_000 + (hash % 1_000_000_000) as i64
+}
+
 /// Open a converted `Page`/`Title` database file in a reader tab.
 fn open_imported_db(
     state: &mut State,
     out: &std::path::Path,
     title: String,
-    book_id: i64,
     origin: Option<String>,
 ) {
+    let book_id = imported_book_id(out);
     if let Some(url) = origin {
         if let Some(stem) = out.file_stem().and_then(|s| s.to_str()) {
             let _ = std::fs::write(books_dir().join(format!("{stem}.db.url")), url);
@@ -1200,18 +1220,36 @@ fn refresh_download_list(state: &mut State) {
         state.status = String::from("enter an archive.org item id");
         return;
     }
-    match shamela_import::archive::item_files(&id) {
-        Ok(files) => {
-            let items = shamela_import::archive::downloadable_files(&files);
-            let count = items.len();
-            state.dl_files = items.into_iter().cloned().collect();
-            state.dl_selected.clear();
-            state.dl_filter.clear();
-            state.status = format!("item {id}: {count} importable files");
+    state.dl_files.clear();
+    state.dl_selected.clear();
+    state.dl_filter.clear();
+    let archive = state.dl_archive.trim().to_string();
+    if archive.is_empty() {
+        match shamela_import::archive::item_files(&id) {
+            Ok(files) => {
+                let items = shamela_import::archive::downloadable_files(&files);
+                let count = items.len();
+                state.dl_files = items.into_iter().cloned().collect();
+                state.status = format!("item {id}: {count} importable files");
+            }
+            Err(err) => {
+                state.status = format!("fetch failed: {err}");
+            }
         }
-        Err(err) => {
-            state.dl_files.clear();
-            state.status = format!("fetch failed: {err}");
+    } else {
+        match shamela_import::archive::browse_archive(&id, &archive) {
+            Ok(files) => {
+                let count = files.len();
+                state.dl_files = files;
+                state.status = if count == 0 {
+                    format!("pack {archive}: no books inside")
+                } else {
+                    format!("pack {archive}: {count} books inside")
+                };
+            }
+            Err(err) => {
+                state.status = format!("pack browse failed: {err}");
+            }
         }
     }
 }
@@ -1346,11 +1384,10 @@ fn finalize_download(state: &mut State, id: usize) {
                     } else {
                         book.meta.title.clone()
                     };
-                    let book_id = book.meta.id;
                     match shamela_import::convert::bok_to_book_db(&book, &out) {
                         Ok(()) => {
                             write_sidecar(&dest, &url);
-                            open_imported_db(state, &out, title, book_id, Some(url));
+                            open_imported_db(state, &out, title, Some(url));
                         }
                         Err(err) => {
                             fail_job(state, index, format!("convert failed: {err}"));
@@ -1358,7 +1395,7 @@ fn finalize_download(state: &mut State, id: usize) {
                     }
                 }
                 Err(err) => {
-                    fail_job(state, index, format!("BOK read failed: {err}"));
+                    fail_job(state, index, format!("book read failed: {err}"));
                 }
             }
         }
@@ -1374,7 +1411,7 @@ fn finalize_download(state: &mut State, id: usize) {
                     import_bok_list(state, &boks, &url);
                 }
                 Ok(_) => {
-                    fail_job(state, index, String::from("no .bok inside"));
+                    fail_job(state, index, String::from("no books inside"));
                 }
                 Err(err) => {
                     fail_job(state, index, format!("extract failed: {err}"));
@@ -1406,7 +1443,10 @@ fn import_bok_list(state: &mut State, boks: &[std::path::PathBuf], url: &str) {
             .and_then(|part| part.to_str())
             .unwrap_or("book")
             .to_string();
-        let out = books_dir().join(format!("{inner_stem}.db"));
+        let out = books_dir().join(format!(
+            "{}_{inner_stem}.db",
+            short_hash(&bok.display().to_string())
+        ));
         let Ok(book) = shamela_import::bok::open_bok(bok) else {
             continue;
         };
@@ -1420,7 +1460,7 @@ fn import_bok_list(state: &mut State, boks: &[std::path::PathBuf], url: &str) {
         }
         count += 1;
         if !opened {
-            open_imported_db(state, &out, title, book.meta.id, Some(url.to_string()));
+            open_imported_db(state, &out, title, Some(url.to_string()));
             opened = true;
         }
     }
@@ -1439,12 +1479,7 @@ fn downloads_dir() -> PathBuf {
 
 /// Archive vs single book by extension.
 fn after_kind(name: &str) -> AfterDl {
-    let lower = name.to_lowercase();
-    if lower.ends_with(".rar")
-        || lower.ends_with(".zip")
-        || lower.ends_with(".tar.gz")
-        || lower.ends_with(".tgz")
-    {
+    if shamela_import::extract::is_archive(name) {
         AfterDl::ImportArchive
     } else {
         AfterDl::ImportBok
@@ -1458,12 +1493,38 @@ fn enqueue_file(state: &mut State, name: String) {
         state.status = String::from("enter an archive.org item id first");
         return;
     }
-    let url = shamela_import::archive::download_url(&item, &name);
-    let file_name = name.rsplit('/').next().unwrap_or(&name).to_string();
+    let file = state
+        .dl_files
+        .iter()
+        .find(|file| file.name == name)
+        .cloned();
+    let url = file
+        .as_ref()
+        .map(|file| shamela_import::archive::file_url(&item, file))
+        .unwrap_or_else(|| shamela_import::archive::download_url(&item, &name));
+    let leaf = name.rsplit('/').next().unwrap_or(&name).to_string();
+    let file_name = if state.dl_archive.is_empty() {
+        leaf.clone()
+    } else {
+        format!(
+            "{}_{leaf}",
+            short_hash(&format!("{item}/{}/{name}", state.dl_archive))
+        )
+    };
     let dest = downloads_dir().join(&file_name);
-    let after = after_kind(&file_name);
-    enqueue(state, file_name.clone(), url, dest, after);
-    state.status = format!("queued: {file_name}");
+    let after = after_kind(&leaf);
+    enqueue(state, leaf.clone(), url, dest, after);
+    state.status = format!("queued: {leaf}");
+}
+
+/// Stable short tag used to keep deep-pack file names unique.
+fn short_hash(text: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:08x}")
 }
 
 /// Parse an archive.org item id out of a bare id or a pasted URL.
@@ -1556,10 +1617,17 @@ fn display_name(name: &str) -> String {
     trim_text(name.rsplit('/').next().unwrap_or(name), 38)
 }
 
+/// archive.org can list and stream entries from ZIP/RAR containers, but its
+/// 7z view often fails; 7z files are downloaded whole and unpacked locally.
+fn can_browse(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".zip") || lower.ends_with(".rar")
+}
+
 /// Short kind badge of a source file.
 fn file_kind(name: &str, lang: Lang) -> &'static str {
     let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".bok") {
+    if lower.ends_with(".bok") || lower.ends_with(".mdb") || lower.ends_with(".mbok") {
         tr(lang, "kind_book")
     } else if shamela_import::extract::is_importable(name) {
         tr(lang, "kind_pack")
@@ -1581,10 +1649,20 @@ fn visible_files(state: &State) -> Vec<shamela_import::archive::ArchiveFile> {
 
 /// Queue every selected source file (list order).
 fn download_selected(state: &mut State) {
+    if state.dl_sources {
+        state.status = String::from("open a source first");
+        return;
+    }
+    let total = state
+        .dl_files
+        .iter()
+        .filter(|file| state.dl_selected.contains(&file.name))
+        .count();
     let names: Vec<String> = state
         .dl_files
         .iter()
         .filter(|file| state.dl_selected.contains(&file.name))
+        .take(MAX_QUEUE_BATCH)
         .map(|file| file.name.clone())
         .collect();
     if names.is_empty() {
@@ -1595,7 +1673,11 @@ fn download_selected(state: &mut State) {
     for name in names {
         enqueue_file(state, name);
     }
-    state.status = format!("queued {count} selected file(s)");
+    state.status = if total > MAX_QUEUE_BATCH {
+        format!("queued first {count} of {total} selected file(s) — narrow with the filter")
+    } else {
+        format!("queued {count} selected file(s)")
+    };
 }
 
 /// Download the book that is open right now: the recorded source URL of an
@@ -2377,23 +2459,42 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::TocJump(target) => jump_to_page(state, target),
         Message::DownloadIdInput(id) => {
             state.dl_id = parse_item_id(&id);
+            // A typed id always means "show this item", not an inner pack
+            // or file list left over from the previous source.
+            state.dl_archive.clear();
+            state.dl_files.clear();
+            state.dl_selected.clear();
         }
         Message::DownloadList => {
             state.dl_results.clear();
+            state.dl_archive.clear();
+            state.dl_sources = false;
             refresh_download_list(state);
         }
         Message::DownloadFile(name) => enqueue_file(state, name),
         Message::DownloadAll => {
-            let files: Vec<String> = state.dl_files.iter().map(|f| f.name.clone()).collect();
-            let count = files.len();
-            for name in files {
-                enqueue_file(state, name);
-            }
-            state.status = if count == 0 {
-                String::from("no files listed — fetch a source first")
+            if state.dl_sources {
+                state.status = String::from("open a source first");
             } else {
-                format!("queued all {count} file(s)")
-            };
+                let total = state.dl_files.len();
+                let files: Vec<String> = state
+                    .dl_files
+                    .iter()
+                    .take(MAX_QUEUE_BATCH)
+                    .map(|file| file.name.clone())
+                    .collect();
+                let queued = files.len();
+                for name in files {
+                    enqueue_file(state, name);
+                }
+                state.status = if total == 0 {
+                    String::from("no files listed — fetch a source first")
+                } else if total > MAX_QUEUE_BATCH {
+                    format!("queued first {queued} of {total} file(s) — narrow with the filter")
+                } else {
+                    format!("queued all {total} file(s)")
+                };
+            }
         }
         Message::DownloadCurrent => download_current(state),
         Message::DownloadTab(index) => download_tab(state, index),
@@ -2417,11 +2518,15 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::DlSelectAll => {
-            let files = visible_files(state);
-            for file in files {
-                state.dl_selected.insert(file.name);
+            if state.dl_sources {
+                state.status = String::from("open a source first");
+            } else {
+                let files = visible_files(state);
+                for file in files {
+                    state.dl_selected.insert(file.name);
+                }
+                state.status = format!("selected {} file(s)", state.dl_selected.len());
             }
-            state.status = format!("selected {} file(s)", state.dl_selected.len());
         }
         Message::DlSelectNone => {
             state.dl_selected.clear();
@@ -2439,10 +2544,36 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             open_external(&dir.display().to_string());
             state.status = format!("downloads: {}", dir.display());
         }
-        Message::DlPresetSource(id) => {
-            state.dl_id = id;
+        Message::DlPresetSource(index) => {
+            let Some(source) = DL_PRESETS.get(index) else {
+                return Task::none();
+            };
+            state.dl_id = String::from(source.id);
+            state.dl_archive = source.archive.unwrap_or("").to_string();
             state.dl_results.clear();
+            state.dl_filter.clear();
+            state.dl_sources = false;
             refresh_download_list(state);
+        }
+        Message::DlBrowseArchive(archive) => {
+            state.dl_archive = archive;
+            state.dl_results.clear();
+            state.dl_filter.clear();
+            state.dl_sources = false;
+            refresh_download_list(state);
+        }
+        Message::DlBackArchive => {
+            if !state.dl_archive.is_empty() {
+                state.dl_archive.clear();
+                state.dl_filter.clear();
+                refresh_download_list(state);
+            }
+        }
+        Message::DlSourcesToggle => {
+            state.dl_sources = !state.dl_sources;
+            if state.dl_sources {
+                state.dl_results.clear();
+            }
         }
         Message::DlQueryInput(text) => state.dl_query = text,
         Message::DlSearch => {
@@ -2450,6 +2581,8 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             if query.is_empty() {
                 state.status = String::from("type a book title to search archive.org");
             } else {
+                state.dl_sources = false;
+                state.dl_archive.clear();
                 match shamela_import::archive::search_items(&query, 30) {
                     Ok(items) => {
                         let count = items.len();
@@ -2466,6 +2599,8 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DlClearResults => state.dl_results.clear(),
         Message::DlOpenItem(id) => {
             state.dl_id = id;
+            state.dl_archive.clear();
+            state.dl_sources = false;
             state.dl_results.clear();
             state.dl_filter.clear();
             refresh_download_list(state);
@@ -2642,18 +2777,13 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.status = String::from("settings reset");
         }
         Message::OpenImported(name) => {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
             let path = books_dir().join(&name);
             let title = path
                 .file_stem()
                 .and_then(|part| part.to_str())
                 .unwrap_or("book")
                 .to_string();
-            let mut hasher = DefaultHasher::new();
-            name.hash(&mut hasher);
-            let book_id = hasher.finish() as i64;
-            open_imported_db(state, &path, title, book_id, None);
+            open_imported_db(state, &path, title, None);
         }
         Message::FindPage => {
             let query = state.query.trim().to_string();
@@ -3114,37 +3244,338 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-/// Curated keyless archive.org sources (id, Arabic label).
-const DL_PRESETS: &[(&str, &str)] = &[
-    ("mutunulhadith", "متون الحديث (١٧٢)"),
-    ("shamelah-books", "الشاملة 2.0 (٨٠+)"),
-    ("ghazali3shamela", "كتب الغزالي (٣٢)"),
-    ("AlbanyBok", "كتب الألباني (٩٤)"),
-    ("ahl_sunna_books_shamela", "أهل السنة (١٥١)"),
-    ("kotobe-mojahed-din-maktab-shamele", "مكتبة المجاهد — RAR"),
+/// One curated keyless source. `archive` switches the popup to a container
+/// listing so a single book can be fetched without downloading the whole pack.
+struct DlSource {
+    id: &'static str,
+    label: &'static str,
+    archive: Option<&'static str>,
+    count: &'static str,
+    format: &'static str,
+    note: &'static str,
+    group: &'static str,
+}
+
+const DL_PRESETS: &[DlSource] = &[
+    DlSource {
+        id: "mutunulhadith",
+        label: "متون الحديث",
+        archive: None,
+        count: "١٧٢",
+        format: "BOK",
+        note: "RAR ٩٩MB",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "shamelah-books",
+        label: "المكتبة الشاملة ٢.٠",
+        archive: None,
+        count: "٨٠ + ٧z",
+        format: "BOK",
+        note: "BOK + ٧z",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "ghazali3shamela",
+        label: "كتب الغزالي",
+        archive: None,
+        count: "٣٢",
+        format: "BOK",
+        note: "",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "AlbanyBok",
+        label: "كتب الألباني",
+        archive: None,
+        count: "٩٤",
+        format: "BOK",
+        note: "ZIP ٣٥MB",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "ahl_sunna_books_shamela",
+        label: "كتب أهل السنة",
+        archive: None,
+        count: "١٥١",
+        format: "BOK",
+        note: "ZIP ٣٤MB",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "kotobe-mojahed-din-maktab-shamele",
+        label: "مكتبة المجاهد",
+        archive: None,
+        count: "—",
+        format: "BOK",
+        note: "RAR ١.٨MB",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "SHAMELA_201405",
+        label: "نماذج الشاملة ٢٠١٤",
+        archive: None,
+        count: "٩",
+        format: "BOK",
+        note: "RAR ٢٥MB",
+        group: "كتب BOK مباشرة",
+    },
+    DlSource {
+        id: "bin-wahaf-shamela",
+        label: "مكتبة ابن وهف",
+        archive: Some("BinWahaf-Shamela.zip"),
+        count: "٢٦٩",
+        format: "MDB",
+        note: "ZIP ٧٦MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "ABDOFAIZE2010_GMAIL_201702",
+        label: "المكتبة السلفية الشاملة",
+        archive: Some("المكتبة السلفية الشاملة.rar"),
+        count: "٤٧٥٣",
+        format: "MDB",
+        note: "RAR ١.٦GB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ١/٧",
+        archive: Some("shamela-hesham.part01.rar"),
+        count: "٣١٠٧",
+        format: "MDB",
+        note: "RAR ٩٥٤MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ٢/٧",
+        archive: Some("shamela-hesham.part02.rar"),
+        count: "٢٩٣٣",
+        format: "MDB",
+        note: "RAR ٩٥٤MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ٣/٧",
+        archive: Some("shamela-hesham.part03.rar"),
+        count: "٣٦٢٨",
+        format: "MDB",
+        note: "RAR ٩٥٤MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ٤/٧",
+        archive: Some("shamela-hesham.part04.rar"),
+        count: "—",
+        format: "MDB",
+        note: "RAR ٩٥٤MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ٥/٧",
+        archive: Some("shamela-hesham.part05.rar"),
+        count: "—",
+        format: "MDB",
+        note: "RAR ٩٥٤MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ٦/٧",
+        archive: Some("shamela-hesham.part06.rar"),
+        count: "—",
+        format: "MDB",
+        note: "RAR ٩٥٤MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "shamela-hesham",
+        label: "شاملة هشام ٧/٧",
+        archive: Some("shamela-hesham.part07.rar"),
+        count: "—",
+        format: "MDB",
+        note: "RAR ٥٥MB",
+        group: "مكتبات MDB للجوال",
+    },
+    DlSource {
+        id: "walid_201501",
+        label: "كتب الألباني — MBOK",
+        archive: Some("كتب الالباني.rar"),
+        count: "٦٥",
+        format: "MBOK",
+        note: "RAR ٧٥MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "walid_201501",
+        label: "الألباني المرقم آليا",
+        archive: Some("كتب الالباني-مرقم آليا.rar"),
+        count: "٩",
+        format: "MBOK",
+        note: "RAR ١٣MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "z_427",
+        label: "كتب التاريخ — MBOK",
+        archive: Some("كتب التاريخ.rar"),
+        count: "١٦٠",
+        format: "MBOK",
+        note: "RAR ٤٠٠MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "z_427",
+        label: "متون الحديث — MBOK",
+        archive: Some("متون الحديث.rar"),
+        count: "١٧٧",
+        format: "MBOK",
+        note: "RAR ٤٦٩MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "shamela.ws.005",
+        label: "شاملة ws ٠٠٥",
+        archive: Some("shamela.ws.005.rar"),
+        count: "٥٢",
+        format: "MBOK",
+        note: "RAR ١٥٦MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "Shamela_android",
+        label: "شاملة أندرويد ١/٥",
+        archive: Some("shamela.part01.rar"),
+        count: "٥٤٦",
+        format: "MBOK",
+        note: "RAR ١٠٠MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "Shamela_android",
+        label: "شاملة أندرويد ٢/٥",
+        archive: Some("shamela.part02.rar"),
+        count: "٥٢٢",
+        format: "MBOK",
+        note: "RAR ١٠٠MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "Shamela_android",
+        label: "شاملة أندرويد ٣/٥",
+        archive: Some("shamela.part03.rar"),
+        count: "١٦٣",
+        format: "MBOK",
+        note: "RAR ١٠٠MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "Shamela_android",
+        label: "شاملة أندرويد ٤/٥",
+        archive: Some("shamela.part04.rar"),
+        count: "—",
+        format: "MBOK",
+        note: "RAR ١٠٠MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
+    DlSource {
+        id: "Shamela_android",
+        label: "شاملة أندرويد ٥/٥",
+        archive: Some("shamela.part05.rar"),
+        count: "—",
+        format: "MBOK",
+        note: "RAR ٣٢MB",
+        group: "مكتبات MBOK (SQLite)",
+    },
 ];
 
-/// One source-file row: selection box, download button, size, kind, name.
+/// Safety cap for bulk actions and for the rendered file rows. Huge packs
+/// contain thousands of books; the filter narrows them before selecting.
+const MAX_QUEUE_BATCH: usize = 500;
+const MAX_RENDER_FILES: usize = 400;
+
+/// One curated source row in the catalog.
+fn source_row(state: &State, index: usize) -> Element<'static, Message> {
+    let source = &DL_PRESETS[index];
+    let note: Element<'static, Message> = if source.note.is_empty() {
+        Space::with_width(0).into()
+    } else {
+        ar_boxed(source.note, 10.0)
+    };
+    row![
+        button(ar_boxed(tr(state.lang, "open"), 11.0)).on_press(Message::DlPresetSource(index)),
+        ar_boxed(source.format, 10.0),
+        ar_boxed(source.count, 11.0),
+        Space::with_width(Length::Fill),
+        ar_boxed(trim_text(source.label, 36), 12.0),
+        note,
+    ]
+    .spacing(5)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Narrow source row for the side panel (no long size note).
+fn source_row_panel(state: &State, index: usize) -> Element<'static, Message> {
+    let source = &DL_PRESETS[index];
+    row![
+        button(ar_boxed(tr(state.lang, "open"), 11.0)).on_press(Message::DlPresetSource(index)),
+        ar_boxed(format!("{} · {}", source.format, source.count), 10.0),
+        Space::with_width(Length::Fill),
+        ar_boxed(trim_text(source.label, 26), 12.0),
+    ]
+    .spacing(4)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Scrollable source catalog with format group headers.
+fn source_list(state: &State) -> Element<'static, Message> {
+    let mut items: Vec<Element<'static, Message>> = Vec::new();
+    let mut group = "";
+    for (index, source) in DL_PRESETS.iter().enumerate() {
+        if source.group != group {
+            group = source.group;
+            items.push(ar_boxed(source.group, 11.0));
+        }
+        items.push(source_row(state, index));
+    }
+    scrollable(column(items).spacing(3))
+        .height(Length::Fixed(145.0))
+        .into()
+}
+
 /// One source-file row: selection box, download button, size, kind, name.
 fn file_row(
     state: &State,
     file: &shamela_import::archive::ArchiveFile,
 ) -> Element<'static, Message> {
     let selected = state.dl_selected.contains(&file.name);
-    row![
+    let mut cells: Vec<Element<'static, Message>> = vec![
         button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
             .on_press(Message::DlToggleFile(file.name.clone()))
-            .style(button::text),
+            .style(button::text)
+            .into(),
         button(ar_boxed(tr(state.lang, "download"), 12.0))
-            .on_press(Message::DownloadFile(file.name.clone())),
-        ar_boxed(fmt_size(file.size), 12.0),
-        ar_boxed(file_kind(&file.name, state.lang), 12.0),
-        Space::with_width(Length::Fill),
-        ar_boxed(display_name(&file.name), 13.0),
-    ]
-    .spacing(6)
-    .width(Length::Fill)
-    .into()
+            .on_press(Message::DownloadFile(file.name.clone()))
+            .into(),
+    ];
+    if state.dl_archive.is_empty() && can_browse(&file.name) {
+        cells.push(
+            button(ar_boxed(tr(state.lang, "browse_pack"), 10.0))
+                .on_press(Message::DlBrowseArchive(file.name.clone()))
+                .into(),
+        );
+    }
+    cells.push(ar_boxed(fmt_size(file.size), 12.0));
+    cells.push(ar_boxed(file_kind(&file.name, state.lang), 12.0));
+    cells.push(Space::with_width(Length::Fill).into());
+    cells.push(ar_boxed(display_name(&file.name), 13.0));
+    row(cells).spacing(6).width(Length::Fill).into()
 }
 
 /// Narrow variant for the side panel: the name lives in a fill row.
@@ -3154,23 +3585,33 @@ fn file_row_panel(
 ) -> Element<'static, Message> {
     let selected = state.dl_selected.contains(&file.name);
     let label = format!("{} ({})", display_name(&file.name), fmt_size(file.size));
-    row![
+    let mut cells: Vec<Element<'static, Message>> = vec![
         button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
             .on_press(Message::DlToggleFile(file.name.clone()))
-            .style(button::text),
+            .style(button::text)
+            .into(),
         button(ar_boxed(tr(state.lang, "download"), 12.0))
-            .on_press(Message::DownloadFile(file.name.clone())),
+            .on_press(Message::DownloadFile(file.name.clone()))
+            .into(),
+    ];
+    if state.dl_archive.is_empty() && can_browse(&file.name) {
+        cells.push(
+            button(ar_boxed(tr(state.lang, "browse_pack"), 10.0))
+                .on_press(Message::DlBrowseArchive(file.name.clone()))
+                .into(),
+        );
+    }
+    cells.push(
         list_row(
             label,
             false,
             Message::DownloadFile(file.name.clone()),
             item_size(state.font_size) - 2.0,
             state.chrome(),
-        ),
-    ]
-    .spacing(4)
-    .width(Length::Fill)
-    .into()
+        )
+        .into(),
+    );
+    row(cells).spacing(4).width(Length::Fill).into()
 }
 
 fn downloads_panel(state: &State) -> Element<'_, Message> {
@@ -3183,6 +3624,16 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
     let fetch = button(ar_boxed(tr(lang, "fetch_books"), 14.0))
         .on_press(Message::DownloadList)
         .width(Length::Fill);
+    let source_toggle = button(ar_boxed(
+        if state.dl_sources {
+            tr(lang, "files")
+        } else {
+            tr(lang, "sources")
+        },
+        13.0,
+    ))
+    .on_press(Message::DlSourcesToggle)
+    .width(Length::Fill);
     let actions = row![
         button(ar_boxed(tr(lang, "download_all"), 14.0))
             .on_press(Message::DownloadAll)
@@ -3209,23 +3660,113 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
         ar(tr(lang, "downloads"), title_size(state.font_size)),
         input.into(),
         fetch.into(),
+        source_toggle.into(),
         actions.into(),
         actions2.into(),
-        ar(tr(lang, "filter_word"), item_size(state.font_size) - 2.0),
-        filter.into(),
     ];
+
+    if state.dl_sources {
+        items.push(ar(
+            format!("{} — {}", tr(lang, "sources"), DL_PRESETS.len()),
+            item_size(state.font_size) - 2.0,
+        ));
+        let mut group = "";
+        for (index, source) in DL_PRESETS.iter().enumerate() {
+            if source.group != group {
+                group = source.group;
+                items.push(ar(source.group, item_size(state.font_size) - 5.0));
+            }
+            items.push(source_row_panel(state, index));
+        }
+        return scrollable(column(items).spacing(5))
+            .height(Length::Fill)
+            .into();
+    }
+
+    if !state.dl_results.is_empty() {
+        items.push(ar(
+            format!(
+                "{} — {}",
+                tr(lang, "search_results"),
+                state.dl_results.len()
+            ),
+            item_size(state.font_size) - 2.0,
+        ));
+        for item in &state.dl_results {
+            items.push(
+                row![
+                    button(ar_boxed(tr(lang, "open"), 12.0))
+                        .on_press(Message::DlOpenItem(item.identifier.clone())),
+                    list_row(
+                        trim_text(&item.title, 44),
+                        false,
+                        Message::DlOpenItem(item.identifier.clone()),
+                        item_size(state.font_size) - 2.0,
+                        state.chrome(),
+                    ),
+                ]
+                .spacing(4)
+                .width(Length::Fill)
+                .into(),
+            );
+        }
+        items.push(
+            button(ar_boxed(tr(lang, "back"), 12.0))
+                .on_press(Message::DlClearResults)
+                .width(Length::Fill)
+                .into(),
+        );
+        return scrollable(column(items).spacing(5))
+            .height(Length::Fill)
+            .into();
+    }
+
+    if !state.dl_archive.is_empty() {
+        items.push(
+            row![
+                button(ar_boxed(tr(lang, "back_to_pack"), 11.0)).on_press(Message::DlBackArchive),
+                Space::with_width(Length::Fill),
+                ar(
+                    trim_text(&state.dl_archive, 20),
+                    item_size(state.font_size) - 4.0
+                ),
+            ]
+            .spacing(4)
+            .into(),
+        );
+    }
+    items.push(ar(
+        tr(lang, "filter_word"),
+        item_size(state.font_size) - 2.0,
+    ));
+    items.push(filter.into());
     let visible = visible_files(state);
     let total = state.dl_files.len();
     if total == 0 {
         items.push(ar(tr(lang, "no_files"), item_size(state.font_size) - 2.0));
     } else {
         items.push(ar(
-            format!("{} {}/{}", tr(lang, "shown_of"), visible.len(), total),
+            format!(
+                "{} {}/{}",
+                tr(lang, "shown_of"),
+                visible.len().min(MAX_RENDER_FILES),
+                total
+            ),
             item_size(state.font_size) - 2.0,
         ));
     }
-    for file in &visible {
+    for file in visible.iter().take(MAX_RENDER_FILES) {
         items.push(file_row_panel(state, file));
+    }
+    if visible.len() > MAX_RENDER_FILES {
+        items.push(ar(
+            format!(
+                "{} {MAX_RENDER_FILES} / {}",
+                tr(lang, "shown_of"),
+                visible.len()
+            ),
+            item_size(state.font_size) - 4.0,
+        ));
     }
     scrollable(column(items).spacing(6))
         .height(Length::Fill)
@@ -4419,8 +4960,8 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
     modal_shell(card)
 }
 
-/// Download manager popup: source, selection, queue and per-file downloads.
-/// Download manager popup: source, selection, queue and per-file downloads.
+/// Download manager popup: source catalog, selection, queue and per-file
+/// downloads. The catalog opens either an item or one of its containers.
 fn downloads_modal(state: &State) -> Element<'_, Message> {
     let dark = matches!(state.theme_kind, AppTheme::Dark);
     let lang = state.lang;
@@ -4436,29 +4977,19 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         .font(AMIRI)
         .on_input(Message::DownloadIdInput)
         .on_submit(Message::DownloadList)
-        .padding(8);
+        .padding(8)
+        .width(Length::Fill);
+    let sources_label = if state.dl_sources {
+        tr(lang, "files")
+    } else {
+        tr(lang, "sources")
+    };
     let source_row = row![
         input,
         button(ar_boxed(tr(lang, "fetch_books"), 14.0)).on_press(Message::DownloadList),
+        button(ar_boxed(sources_label, 13.0)).on_press(Message::DlSourcesToggle),
     ]
     .spacing(6);
-
-    let mut preset_rows: Vec<Element<'_, Message>> = Vec::new();
-    for (index, chunk) in DL_PRESETS.chunks(3).enumerate() {
-        let mut chips: Vec<Element<'_, Message>> = Vec::new();
-        if index == 0 {
-            chips.push(ar_boxed(tr(lang, "preset_sources"), 13.0));
-        }
-        for (id, label) in chunk {
-            chips.push(
-                button(ar_boxed(*label, 12.0))
-                    .on_press(Message::DlPresetSource(String::from(*id)))
-                    .into(),
-            );
-        }
-        preset_rows.push(row(chips).spacing(6).into());
-    }
-    let presets = column(preset_rows).spacing(4);
 
     let archive_search = text_input(tr(lang, "archive_search_hint"), state.dl_query.as_str())
         .font(AMIRI)
@@ -4473,6 +5004,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
 
     let total = state.dl_files.len();
     let visible = visible_files(state);
+    let shown = visible.len().min(MAX_RENDER_FILES);
     let all_size: u64 = state.dl_files.iter().map(|file| file.size).sum();
     let sel_size: u64 = state
         .dl_files
@@ -4577,37 +5109,84 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(145.0));
 
     let (files_header, file_list): (Element<'_, Message>, Element<'_, Message>) =
-        if state.dl_results.is_empty() {
+        if state.dl_sources {
+            let header = row![
+                button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlSourcesToggle),
+                Space::with_width(Length::Fill),
+                ar_boxed(
+                    format!("{} — {}", tr(lang, "sources"), DL_PRESETS.len()),
+                    13.0
+                ),
+            ]
+            .spacing(6);
+            (header.into(), source_list(state))
+        } else if state.dl_results.is_empty() {
             let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
                 .font(AMIRI)
                 .on_input(Message::DlFilterInput)
                 .padding(6)
-                .width(Length::Fixed(220.0));
-            let header = row![
-                filter,
-                ar_boxed(tr(lang, "filter_word"), 12.0),
-                Space::with_width(Length::Fill),
-                ar_boxed(
-                    format!(
-                        "{} — {} {}/{}",
-                        tr(lang, "files_of"),
-                        tr(lang, "shown_of"),
-                        visible.len(),
-                        total
+                .width(Length::Fixed(200.0));
+            let header: Element<'_, Message> = if state.dl_archive.is_empty() {
+                row![
+                    filter,
+                    button(ar_boxed(tr(lang, "sources"), 11.0)).on_press(Message::DlSourcesToggle),
+                    Space::with_width(Length::Fill),
+                    ar_boxed(
+                        format!(
+                            "{} — {} {}/{}",
+                            tr(lang, "files_of"),
+                            tr(lang, "shown_of"),
+                            shown,
+                            total
+                        ),
+                        13.0,
                     ),
-                    13.0,
-                ),
-            ]
-            .spacing(6);
+                ]
+                .spacing(6)
+                .into()
+            } else {
+                column![
+                    row![
+                        button(ar_boxed(tr(lang, "back_to_pack"), 11.0))
+                            .on_press(Message::DlBackArchive),
+                        filter,
+                        Space::with_width(Length::Fill),
+                        ar_boxed(
+                            format!(
+                                "{}: {} — {}/{}",
+                                tr(lang, "inside_pack"),
+                                trim_text(&state.dl_archive, 24),
+                                shown,
+                                total
+                            ),
+                            12.0,
+                        ),
+                    ]
+                    .spacing(6),
+                    ar_boxed(tr(lang, "pack_hint"), 10.0),
+                ]
+                .spacing(2)
+                .into()
+            };
             let mut files: Vec<Element<'_, Message>> = Vec::new();
-            for file in &visible {
+            for file in visible.iter().take(MAX_RENDER_FILES) {
                 files.push(file_row(state, file));
             }
             if files.is_empty() {
                 files.push(ar_boxed(tr(lang, "no_files"), 14.0));
             }
+            if visible.len() > MAX_RENDER_FILES {
+                files.push(ar_boxed(
+                    format!(
+                        "{} {MAX_RENDER_FILES} / {}",
+                        tr(lang, "shown_of"),
+                        visible.len()
+                    ),
+                    11.0,
+                ));
+            }
             let items = scrollable(column(files).spacing(4)).height(Length::Fixed(145.0));
-            (header.into(), items.into())
+            (header, items.into())
         } else {
             let mut rows: Vec<Element<'_, Message>> = Vec::new();
             for item in &state.dl_results {
@@ -4644,7 +5223,6 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     let body = column![
         title,
         source_row,
-        presets,
         search_row,
         controls,
         controls2,

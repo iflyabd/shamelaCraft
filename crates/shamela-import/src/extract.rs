@@ -1,10 +1,11 @@
-//! Pure-Rust archive extraction (ZIP / TAR / TAR.GZ / RAR) for book collections.
+//! Pure-Rust archive extraction (ZIP / TAR / TAR.GZ / RAR / 7z) for book
+//! collections.
 //!
-//! Downloaded collection archives are unpacked locally, then every `.bok`
-//! inside is collected for import. Path traversal is rejected for all
-//! formats (`zip`/`tar` enforce their own rules; RAR entries are sanitized
-//! by hand). RAR filenames fall back to Windows-1256 decoding, matching the
-//! legacy Arabic tooling.
+//! Downloaded collection archives are unpacked locally, then every
+//! `.bok` / `.mdb` / `.mbok` inside is collected for import. Path traversal
+//! is rejected for all formats (`zip`/`tar` enforce their own rules; RAR and
+//! 7z entries are sanitized by hand). RAR filenames fall back to
+//! Windows-1256 decoding, matching the legacy Arabic tooling.
 
 use crate::{err, Result};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ pub fn archive_kind(name: &str) -> Option<&'static str> {
         Some("tar")
     } else if lower.ends_with(".rar") {
         Some("rar")
+    } else if lower.ends_with(".7z") {
+        Some("7z")
     } else {
         None
     }
@@ -28,10 +31,18 @@ pub fn archive_kind(name: &str) -> Option<&'static str> {
 /// True for directly importable books or natively extractable archives.
 pub fn is_importable(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.ends_with(".bok") || archive_kind(&lower).is_some()
+    lower.ends_with(".bok")
+        || lower.ends_with(".mdb")
+        || lower.ends_with(".mbok")
+        || archive_kind(&lower).is_some()
 }
 
-/// Extract `path` into `dest`, returning every `.bok` discovered inside.
+/// True for a file that can be browsed as a container on archive.org.
+pub fn is_archive(name: &str) -> bool {
+    archive_kind(name).is_some()
+}
+
+/// Extract `path` into `dest`, returning every book discovered inside.
 pub fn extract_archive(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
     let name = path
         .file_name()
@@ -42,22 +53,24 @@ pub fn extract_archive(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
         Some("targz") => extract_tar_gz(path, dest),
         Some("tar") => extract_tar(path, dest),
         Some("rar") => extract_rar(path, dest),
+        Some("7z") => extract_7z(path, dest),
         _ => Err(err(format!("unsupported archive: {name}"))),
     }
 }
 
-fn collect_bok(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_books(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|error| err(format!("list dir: {error}")))?;
     for entry in entries {
         let path = entry
             .map_err(|error| err(format!("list dir: {error}")))?
             .path();
         if path.is_dir() {
-            collect_bok(&path, out)?;
-        } else if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("bok"))
-        {
+            collect_books(&path, out)?;
+        } else if path.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("bok")
+                || ext.eq_ignore_ascii_case("mdb")
+                || ext.eq_ignore_ascii_case("mbok")
+        }) {
             out.push(path);
         }
     }
@@ -72,7 +85,7 @@ fn extract_zip(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
         .extract(dest)
         .map_err(|error| err(format!("extract zip: {error}")))?;
     let mut out = Vec::new();
-    collect_bok(dest, &mut out)?;
+    collect_books(dest, &mut out)?;
     Ok(out)
 }
 
@@ -84,7 +97,7 @@ fn extract_tar_gz(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
         .unpack(dest)
         .map_err(|error| err(format!("extract tar.gz: {error}")))?;
     let mut out = Vec::new();
-    collect_bok(dest, &mut out)?;
+    collect_books(dest, &mut out)?;
     Ok(out)
 }
 
@@ -95,7 +108,7 @@ fn extract_tar(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
         .unpack(dest)
         .map_err(|error| err(format!("extract tar: {error}")))?;
     let mut out = Vec::new();
-    collect_bok(dest, &mut out)?;
+    collect_books(dest, &mut out)?;
     Ok(out)
 }
 
@@ -156,7 +169,35 @@ fn extract_rar(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
         })
         .map_err(|error| err(format!("extract rar: {error}")))?;
     let mut out = Vec::new();
-    collect_bok(dest, &mut out)?;
+    collect_books(dest, &mut out)?;
+    Ok(out)
+}
+
+fn extract_7z(path: &Path, dest: &Path) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(dest).map_err(|error| err(format!("mkdir: {error}")))?;
+    sevenz_rust::decompress_file_with_extract_fn(path, dest, |entry, reader, _| {
+        let raw = entry.name();
+        let Some(safe) = sanitize_entry(raw) else {
+            // Consume the entry so the archive stream stays aligned, but never
+            // write outside the destination directory.
+            std::io::copy(reader, &mut std::io::sink()).map_err(sevenz_rust::Error::io)?;
+            return Ok(true);
+        };
+        let target = dest.join(safe);
+        if entry.is_directory() {
+            std::fs::create_dir_all(&target).map_err(sevenz_rust::Error::io)?;
+            return Ok(true);
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
+        }
+        let mut file = std::fs::File::create(&target).map_err(sevenz_rust::Error::io)?;
+        std::io::copy(reader, &mut file).map_err(sevenz_rust::Error::io)?;
+        Ok(true)
+    })
+    .map_err(|error| err(format!("extract 7z: {error}")))?;
+    let mut out = Vec::new();
+    collect_books(dest, &mut out)?;
     Ok(out)
 }
 
@@ -172,9 +213,12 @@ mod tests {
         assert_eq!(archive_kind("a.tgz"), Some("targz"));
         assert_eq!(archive_kind("a.tar"), Some("tar"));
         assert_eq!(archive_kind("a.RAR"), Some("rar"));
+        assert_eq!(archive_kind("a.7z"), Some("7z"));
         assert_eq!(archive_kind("a.bok"), None);
         assert_eq!(archive_kind("a.iso"), None);
         assert!(is_importable("a.bok"));
+        assert!(is_importable("a.mdb"));
+        assert!(is_importable("a.mbok"));
         assert!(is_importable("a.rar"));
         assert!(!is_importable("a.iso"));
     }
@@ -191,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn zip_round_trip_collects_bok() {
+    fn zip_round_trip_collects_books() {
         let dir = std::env::temp_dir().join(format!("sc-extract-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -203,13 +247,16 @@ mod tests {
                 .compression_method(zip::CompressionMethod::Stored);
             writer.start_file("nested/book.bok", options).unwrap();
             writer.write_all(b"fake").unwrap();
+            writer.start_file("nested/book.mdb", options).unwrap();
+            writer.write_all(b"fake").unwrap();
             writer.start_file("notes.txt", options).unwrap();
             writer.write_all(b"hi").unwrap();
             writer.finish().unwrap();
         }
         let out = extract_archive(&zip_path, &dir.join("unpacked")).unwrap();
-        assert_eq!(out.len(), 1);
-        assert!(out[0].ends_with("nested/book.bok"));
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|path| path.ends_with("nested/book.bok")));
+        assert!(out.iter().any(|path| path.ends_with("nested/book.mdb")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

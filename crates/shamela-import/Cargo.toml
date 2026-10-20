@@ -15,3 +15,5 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 rars = "0.10"
+sevenz-rust = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }

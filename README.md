@@ -14,13 +14,16 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - Tolerant Arabic search (tashkeel / hamza / tatweel insensitive) over titles
   and authors, powered by [tantivy](https://github.com/quickwit-oss/tantivy)
 - Tabbed catalog cards (title, authors, death dates, print status)
-- Legacy `.bok` import (pure-Rust Jet/MDB reader) into local `Page`/`Title`
-  databases, with full-text reader tabs, page navigation, and TOC jumping
-- **Download manager**: keyless archive.org sources (ready-made presets or a
-  pasted item URL), per-file / multi-select / whole-item packs, per-book
-  download by title, open-book re-download (reader header + card), name
-  filter, size/kind badges, live progress, queue summary with clear-finished
-  and open-folder, cancel, retry, remove
+- Legacy book import into local `Page`/`Title` databases: `.bok`,
+  Android `.mdb` (`book` + `title` tables) and `.mbok` (SQLite), with
+  full-text reader tabs, page navigation, and TOC jumping
+- **Download manager**: a categorized keyless source catalog for archive.org
+  (Shamela PC/Android/MBOK libraries, 25+ entries and 8,000+ books), a pasted
+  item URL, **deep pack browsing** (list and fetch one book from a ZIP/RAR
+  without downloading the whole collection), per-file / multi-select /
+  whole-item downloads, per-book download by title, open-book re-download,
+  name filter, size/kind badges, live progress, queue summary, cancel, retry
+  and remove. ZIP / TAR / TAR.GZ / RAR / **7z** are extracted locally.
 - **One unified reading pane** for imported books and the Uthmani Quran
 - **Quran tab** with the sura index replacing the library tree, plus nine
   keyless Arabic tafsirs cached locally
@@ -40,8 +43,10 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - [x] `shamela-content`: per-book `.db` reader (`Page`/`Title` + patch semantics)
 - [x] S1/S2 substitution-cipher decoder port (see Knowledge below)
 - [x] HTML content pipeline port (titles, hadeeth tags, footnotes, ⦗⦘ markers, ligatures)
-- [x] `shamela-import`: legacy `.bok` reader (pure-Rust `jetdb`, cp1256 recovery)
-- [x] `shamela-import`: keyless archive.org item listing + `.bok` downloads
+- [x] `shamela-import`: `.bok` / `.mdb` / `.mbok` readers (pure Rust)
+- [x] `shamela-import`: keyless archive.org item listing, deep pack browsing,
+  and `.bok` / `.mdb` / `.mbok` downloads
+- [x] 7z extraction for curated `.bok` collections
 - [x] Reader tabs with page navigation + TOC jumping in the GUI
 - [ ] S2 roots lookup wiring (morphological search expansion)
 - [ ] EPUB importer (same `Page`/`Title` target)
@@ -143,7 +148,7 @@ tolerant Arabic search.
 crates/shamela-db      read-only master.db access (rusqlite)
 crates/shamela-index   Arabic normalization + tantivy index
 crates/shamela-content book .db reader, S1/S2 decoder, HTML pipeline, roots lookup
-crates/shamela-import  BOK/archive import, keyless downloads, Quran + tafsir fetchers
+crates/shamela-import  BOK/MDB/MBOK + archive import, keyless downloads, Quran + tafsir fetchers
 crates/shamelacraft    iced GUI binary, settings, bookmarks and notes stores
 vendor/iced_widget     iced 0.13.4 with the left-scrollbar patch (MIT)
 ```

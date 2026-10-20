@@ -1,20 +1,26 @@
-//! Legacy `.bok` reader.
+//! Legacy Shamela book readers.
 //!
-//! A `.bok` file is a Jet3 MS Access database (Windows-1256 text, cf. the
-//! `MDB_JET3_CHARSET=cp1256` convention used by mdbtools-based tooling).
-//! Layout facts (from `shaybix/Raazi` `shamela/extract.py`):
+//! Three layouts are supported, all read-only and pure Rust:
 //!
-//! * `main(BkId, Bk, Betaka, Inf, Auth, AuthInf, cat, AD)` — one catalog row.
-//! * `b{id}(nass, id, part, page)` — body pages for book id.
-//! * `t{id}(tit, lvl, sub, id)` — headings; `id` points at a body row.
+//! * `.bok` — Jet3 MS Access, `main(BkId, Bk, Betaka, Inf, Auth, AuthInf,
+//!   cat, AD)` plus `b{id}`/`t{id}` tables.
+//! * Mobile `.mdb` — Jet3 MS Access with a `book(id, nass, part, page)`
+//!   table and a `title(id, tit, lvl, sub)` table.
+//! * Mobile `.mbok` — SQLite with `caption` plus `page_content` (FTS3
+//!   shadow tables are ignored).
 //!
-//! Read with pure-Rust `jetdb`; Arabic bytes are recovered by re-decoding
-//! jetdb's Latin-1 text as Windows-1256 (lossless round-trip).
+//! The mobile formats are what Shamela's Android/portable libraries store
+//! inside large ZIP/RAR collections. `.bok` and `.mdb` are both Jet3
+//! databases; only the table layout differs.
+//!
+//! Arabic Jet3 text is recovered by re-decoding jetdb's Latin-1 view as
+//! Windows-1256 (lossless round-trip).
 
 use crate::{err, Result};
 use encoding_rs::WINDOWS_1256;
 use jetdb::{read_catalog, read_table_def, read_table_rows, PageReader, Value};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 
 /// Catalog row of a `.bok` file.
@@ -73,10 +79,16 @@ pub fn fix_encoding(text: &str) -> String {
     WINDOWS_1256.decode(&bytes).0.into_owned()
 }
 
-fn value_text(value: &Value) -> String {
+fn value_text(value: &Value, legacy: bool) -> String {
     match value {
         Value::Null => String::new(),
-        Value::Text(text) => fix_encoding(text),
+        Value::Text(text) => {
+            if legacy {
+                fix_encoding(text)
+            } else {
+                text.clone()
+            }
+        }
         Value::Long(num) => num.to_string(),
         Value::Int(num) => num.to_string(),
         Value::BigInt(num) => num.to_string(),
@@ -108,6 +120,9 @@ fn value_int(value: &Value) -> Option<i64> {
 struct Table {
     columns: HashMap<String, usize>,
     rows: Vec<Vec<Value>>,
+    /// Jet3 stores text as cp1256 bytes viewed through Latin-1; Jet4+ is
+    /// already decoded as UTF-16 by jetdb.
+    legacy: bool,
 }
 
 impl Table {
@@ -120,30 +135,33 @@ impl Table {
     }
 }
 
-fn read_table(reader: &mut PageReader, name: &str) -> Result<Table> {
+fn read_table(reader: &mut PageReader, name: &str, legacy: bool) -> Result<Table> {
     let catalog = read_catalog(reader).map_err(|error| crate::err(format!("catalog: {error}")))?;
     let entry = catalog
         .iter()
         .find(|item| item.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| err(format!("table '{name}' not found")))?;
     let def = read_table_def(reader, &entry.name, entry.table_page)
-        .map_err(|error| err(format!("{error}")))?;
+        .map_err(|error| crate::err(format!("{error}")))?;
     let columns = def
         .columns
         .iter()
         .enumerate()
         .map(|(index, col)| (col.name.to_ascii_lowercase(), index))
         .collect();
-    let result =
-        read_table_rows(reader, &def).map_err(|error| err(format!("rows of {name}: {error}")))?;
+    let result = read_table_rows(reader, &def)
+        .map_err(|error| crate::err(format!("rows of {name}: {error}")))?;
     Ok(Table {
         columns,
         rows: result.rows,
+        legacy,
     })
 }
 
 fn text_of(table: &Table, row: &[Value], name: &str) -> String {
-    value_text(table.get(row, name)).trim().to_string()
+    value_text(table.get(row, name), table.legacy)
+        .trim()
+        .to_string()
 }
 
 fn int_of(table: &Table, row: &[Value], name: &str) -> Option<i64> {
@@ -158,15 +176,109 @@ fn opt_text(value: String) -> Option<String> {
     }
 }
 
-/// Open and fully read a legacy `.bok` file.
+fn positive_text(value: Option<i64>) -> Option<String> {
+    value.filter(|num| *num > 0).map(|num| num.to_string())
+}
+
+fn is_sqlite(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    file.read_exact(&mut header).is_ok() && &header == b"SQLite format 3\0"
+}
+
+fn is_jet3(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut header = [0u8; 0x15];
+    if file.read_exact(&mut header).is_err() {
+        return true;
+    }
+    header[0x14] == 0
+}
+
+/// Strip a leading catalog number such as `085 - صلة الأرحام`.
+///
+/// Only a real separator after the digits is removed; titles that simply
+/// start with a number (`1000 سؤال`) are kept intact.
+fn clean_title(raw: &str) -> String {
+    let text = raw.trim();
+    let mut digits_end = 0;
+    for (index, ch) in text.char_indices() {
+        if ch.is_numeric() {
+            digits_end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if digits_end > 0 {
+        let rest = text[digits_end..].trim_start();
+        for separator in ['-', '–', '—', ':', '.', '|', 'ـ'] {
+            if let Some(after) = rest.strip_prefix(separator) {
+                let clean = after.trim_start();
+                if !clean.is_empty() {
+                    return clean.to_string();
+                }
+            }
+        }
+    }
+    text.to_string()
+}
+
+fn fallback_title(first_page: &str, path: &Path) -> String {
+    let line = first_page
+        .lines()
+        .map(|line| line.trim().trim_matches('_').trim())
+        .find(|line| line.chars().count() >= 3)
+        .unwrap_or("");
+    if line.is_empty() {
+        return path
+            .file_stem()
+            .and_then(|part| part.to_str())
+            .unwrap_or("book")
+            .to_string();
+    }
+    let mut title: String = line.chars().take(80).collect();
+    if line.chars().count() > 80 {
+        title.push('…');
+    }
+    title
+}
+
+/// Open and fully read a legacy Shamela book in any supported layout.
 pub fn open_bok(path: &Path) -> Result<BokBook> {
+    if is_sqlite(path) {
+        return open_mbok(path);
+    }
     let path_str = path
         .to_str()
         .ok_or_else(|| err("book path is not valid UTF-8"))?;
-    let mut reader =
-        PageReader::open(path_str).map_err(|error| crate::err(format!("open .bok: {error}")))?;
+    let mut reader = PageReader::open(path_str)
+        .map_err(|error| crate::err(format!("open .bok/.mdb: {error}")))?;
+    let catalog =
+        read_catalog(&mut reader).map_err(|error| crate::err(format!("catalog: {error}")))?;
+    let legacy = is_jet3(path);
+    if catalog
+        .iter()
+        .any(|item| item.name.eq_ignore_ascii_case("main"))
+    {
+        open_legacy(&mut reader, legacy)
+    } else if catalog
+        .iter()
+        .any(|item| item.name.eq_ignore_ascii_case("book"))
+    {
+        open_mobile_mdb(&mut reader, path, legacy)
+    } else {
+        Err(err(
+            "unknown book layout: neither 'main' nor 'book' table found",
+        ))
+    }
+}
 
-    let main = read_table(&mut reader, "main")?;
+fn open_legacy(reader: &mut PageReader, legacy: bool) -> Result<BokBook> {
+    let main = read_table(reader, "main", legacy)?;
     let row = main
         .rows
         .first()
@@ -185,7 +297,7 @@ pub fn open_bok(path: &Path) -> Result<BokBook> {
     };
 
     let body_table = format!("b{id}");
-    let body = read_table(&mut reader, &body_table)?;
+    let body = read_table(reader, &body_table, legacy)?;
     let mut pages = Vec::with_capacity(body.rows.len());
     for (index, body_row) in body.rows.iter().enumerate() {
         let text = text_of(&body, body_row, "nass");
@@ -202,7 +314,7 @@ pub fn open_bok(path: &Path) -> Result<BokBook> {
 
     let toc_table = format!("t{id}");
     let mut toc = Vec::new();
-    if let Ok(headings) = read_table(&mut reader, &toc_table) {
+    if let Ok(headings) = read_table(reader, &toc_table, legacy) {
         for heading_row in &headings.rows {
             let heading = text_of(&headings, heading_row, "tit");
             if heading.is_empty() {
@@ -218,6 +330,280 @@ pub fn open_bok(path: &Path) -> Result<BokBook> {
     }
 
     Ok(BokBook { meta, pages, toc })
+}
+
+fn open_mobile_mdb(reader: &mut PageReader, path: &Path, legacy: bool) -> Result<BokBook> {
+    let book = read_table(reader, "book", legacy)?;
+    let mut pages = Vec::with_capacity(book.rows.len());
+    for (index, row) in book.rows.iter().enumerate() {
+        let text = text_of(&book, row, "nass");
+        if text.is_empty() {
+            continue;
+        }
+        pages.push(BokPage {
+            id: int_of(&book, row, "id").unwrap_or(index as i64 + 1),
+            text,
+            part: positive_text(int_of(&book, row, "part")),
+            page: positive_text(int_of(&book, row, "page")),
+        });
+    }
+
+    let mut toc = Vec::new();
+    if let Ok(headings) = read_table(reader, "title", legacy) {
+        for row in &headings.rows {
+            let heading = clean_title(&text_of(&headings, row, "tit"));
+            if heading.is_empty() {
+                continue;
+            }
+            toc.push(BokToc {
+                heading,
+                level: int_of(&headings, row, "lvl").unwrap_or(1).max(1),
+                sub: int_of(&headings, row, "sub").unwrap_or(0),
+                page_id: int_of(&headings, row, "id").unwrap_or(0),
+            });
+        }
+    }
+
+    let first_page = pages.first().map(|page| page.text.as_str()).unwrap_or("");
+    let title = toc
+        .iter()
+        .find(|heading| heading.level == 1)
+        .or_else(|| toc.first())
+        .map(|heading| heading.heading.clone())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| fallback_title(first_page, path));
+    let id = path
+        .file_stem()
+        .and_then(|part| part.to_str())
+        .and_then(|stem| stem.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    Ok(BokBook {
+        meta: BokMeta {
+            id,
+            title,
+            card: String::new(),
+            info: String::new(),
+            author: String::new(),
+            author_bio: String::new(),
+            category: String::new(),
+            died: None,
+        },
+        pages,
+        toc,
+    })
+}
+
+struct Caption {
+    parent_id: i64,
+    page_id: i64,
+    title: String,
+    level: i64,
+}
+
+fn sqlite_table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+fn load_captions(conn: &rusqlite::Connection, captions: &mut Vec<Caption>) -> Result<()> {
+    let with_level = conn.prepare(
+        "SELECT CAST(parent_id AS INTEGER), CAST(page_id AS INTEGER),
+                CAST(title AS TEXT), COALESCE(CAST(level AS INTEGER), 1)
+         FROM caption ORDER BY cid",
+    );
+    if let Ok(mut statement) = with_level {
+        let rows = statement
+            .query_map([], |row| {
+                Ok(Caption {
+                    parent_id: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                    page_id: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    level: row.get::<_, Option<i64>>(3)?.unwrap_or(1).max(1),
+                })
+            })
+            .map_err(|error| err(format!("caption query: {error}")))?;
+        for row in rows {
+            captions.push(row.map_err(|error| err(format!("caption row: {error}")))?);
+        }
+        return Ok(());
+    }
+
+    // Older mobile libraries omit the level column; default to a flat TOC.
+    let mut statement = conn
+        .prepare(
+            "SELECT CAST(parent_id AS INTEGER), CAST(page_id AS INTEGER),
+                    CAST(title AS TEXT)
+             FROM caption ORDER BY cid",
+        )
+        .map_err(|error| err(format!("caption query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(Caption {
+                parent_id: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                page_id: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                level: 1,
+            })
+        })
+        .map_err(|error| err(format!("caption query: {error}")))?;
+    for row in rows {
+        captions.push(row.map_err(|error| err(format!("caption row: {error}")))?);
+    }
+    Ok(())
+}
+
+fn open_mbok(path: &Path) -> Result<BokBook> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| err(format!("open .mbok: {error}")))?;
+
+    let mut captions = Vec::new();
+    if sqlite_table_exists(&conn, "caption") {
+        load_captions(&conn, &mut captions)?;
+    }
+
+    let mut pages = read_mbok_pages(&conn)?;
+    if pages.is_empty() {
+        pages = read_mbok_fts_pages(&conn)?;
+    }
+
+    let mut toc = Vec::new();
+    for caption in &captions {
+        let heading = clean_title(&caption.title);
+        if heading.is_empty() {
+            continue;
+        }
+        toc.push(BokToc {
+            heading,
+            level: caption.level,
+            sub: caption.parent_id,
+            page_id: caption.page_id,
+        });
+    }
+
+    let first_page = pages.first().map(|page| page.text.as_str()).unwrap_or("");
+    let title = captions
+        .iter()
+        .find(|caption| caption.parent_id == 0 && !caption.title.trim().is_empty())
+        .or_else(|| {
+            captions
+                .iter()
+                .find(|caption| !caption.title.trim().is_empty())
+        })
+        .map(|caption| clean_title(&caption.title))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| fallback_title(first_page, path));
+
+    Ok(BokBook {
+        meta: BokMeta {
+            id: 0,
+            title,
+            card: String::new(),
+            info: String::new(),
+            author: String::new(),
+            author_bio: String::new(),
+            category: String::new(),
+            died: None,
+        },
+        pages,
+        toc,
+    })
+}
+
+fn read_mbok_pages(conn: &rusqlite::Connection) -> Result<Vec<BokPage>> {
+    if !sqlite_table_exists(conn, "page_content") {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT CAST(docid AS INTEGER), CAST(c0id AS INTEGER),
+                    CAST(c2number AS TEXT), CAST(c3part AS TEXT),
+                    CAST(c5content AS TEXT), CAST(c6content_plain AS TEXT)
+             FROM page_content ORDER BY docid",
+        )
+        .map_err(|error| err(format!("page_content query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            let docid = row.get::<_, i64>(0)?;
+            let c0id = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+            let number = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+            let part = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+            let rich = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+            let plain = row.get::<_, Option<String>>(5)?.unwrap_or_default();
+            Ok((docid, c0id, number, part, rich, plain))
+        })
+        .map_err(|error| err(format!("page_content rows: {error}")))?;
+    let mut pages = Vec::new();
+    for row in rows {
+        let (docid, c0id, number, part, rich, plain) =
+            row.map_err(|error| err(format!("page_content row: {error}")))?;
+        let text = if rich.trim().is_empty() { plain } else { rich };
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        pages.push(BokPage {
+            id: if c0id > 0 { c0id } else { docid },
+            text,
+            part: positive_sql_text(part),
+            page: positive_sql_text(number),
+        });
+    }
+    Ok(pages)
+}
+
+fn read_mbok_fts_pages(conn: &rusqlite::Connection) -> Result<Vec<BokPage>> {
+    if !sqlite_table_exists(conn, "page") {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn
+        .prepare(
+            "SELECT CAST(id AS INTEGER), CAST(number AS TEXT), CAST(part AS TEXT),
+                    CAST(content AS TEXT), CAST(content_plain AS TEXT)
+             FROM page ORDER BY id",
+        )
+        .map_err(|error| err(format!("page query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            let id = row.get::<_, i64>(0)?;
+            let number = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+            let part = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+            let rich = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+            let plain = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+            Ok((id, number, part, rich, plain))
+        })
+        .map_err(|error| err(format!("page rows: {error}")))?;
+    let mut pages = Vec::new();
+    for row in rows {
+        let (id, number, part, rich, plain) =
+            row.map_err(|error| err(format!("page row: {error}")))?;
+        let text = if rich.trim().is_empty() { plain } else { rich };
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        pages.push(BokPage {
+            id,
+            text,
+            part: positive_sql_text(part),
+            page: positive_sql_text(number),
+        });
+    }
+    Ok(pages)
+}
+
+fn positive_sql_text(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -236,9 +622,18 @@ mod tests {
 
     #[test]
     fn value_helpers() {
-        assert_eq!(value_text(&Value::Null), "");
-        assert_eq!(value_text(&Value::Long(42)), "42");
+        assert_eq!(value_text(&Value::Null, true), "");
+        assert_eq!(value_text(&Value::Long(42), true), "42");
+        assert_eq!(value_text(&Value::Text("مرحبا".into()), false), "مرحبا");
         assert_eq!(value_int(&Value::Text("7".to_string())), Some(7));
         assert_eq!(value_int(&Value::Null), None);
+    }
+
+    #[test]
+    fn catalog_number_is_removed_only_with_separator() {
+        assert_eq!(clean_title("085 - صلة الأرحام"), "صلة الأرحام");
+        assert_eq!(clean_title("12 – باب الطهارة"), "باب الطهارة");
+        assert_eq!(clean_title("1000 سؤال وجواب"), "1000 سؤال وجواب");
+        assert_eq!(clean_title("١٢٣ - كتاب"), "كتاب");
     }
 }

@@ -19,6 +19,9 @@ const SEARCH_BASE: &str = "https://archive.org/advancedsearch.php";
 pub struct ArchiveFile {
     pub name: String,
     pub size: u64,
+    /// Full download URL when this file lives inside a remote container.
+    /// `None` means the URL is built from the item id and `name`.
+    pub url: Option<String>,
 }
 
 /// One archive.org item returned by a title search.
@@ -50,6 +53,7 @@ pub fn parse_item_files(document: &str) -> Result<Vec<ArchiveFile>> {
         out.push(ArchiveFile {
             name: name.to_string(),
             size,
+            url: None,
         });
     }
     Ok(out)
@@ -80,11 +84,12 @@ pub fn parse_search_items(document: &str) -> Result<Vec<ArchiveItem>> {
     Ok(out)
 }
 
-/// Search public archive.org uploads that carry Shamela `.bok` books.
+/// Search public archive.org uploads that carry Shamela books.
 ///
 /// The query is a book title, not an item id. Results are limited to text
-/// items whose titles mention the book format (`bok` / `بوك` / `بصيغة بوك`),
-/// which targets the large keyless Shamela mirrors on archive.org.
+/// items whose titles mention a supported book format (`bok`, `mdb`, `mbok`,
+/// `بوك`, `بصيغة بوك`) or the word `شاملة`, which targets the large keyless
+/// Shamela mirrors on archive.org.
 pub fn search_items(query: &str, rows: usize) -> Result<Vec<ArchiveItem>> {
     let clean: String = query
         .chars()
@@ -96,8 +101,7 @@ pub fn search_items(query: &str, rows: usize) -> Result<Vec<ArchiveItem>> {
     }
     let rows = rows.clamp(1, 50);
     let lucene = format!(
-        "title:(\"{clean}\") AND mediatype:texts \
-         AND (title:(bok) OR title:(\"بوك\") OR title:(\"بصيغة بوك\"))"
+        "title:(\"{clean}\") AND mediatype:texts AND (title:(bok) OR title:(mdb) OR title:(mbok) OR title:(\"بوك\") OR title:(\"بصيغة بوك\") OR title:(\"شاملة\"))"
     );
     let url = format!(
         "{SEARCH_BASE}?q={}&fl%5B%5D=identifier&fl%5B%5D=title&rows={rows}&page=1&output=json&sort%5B%5D=downloads%20desc",
@@ -114,13 +118,32 @@ pub fn bok_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
         .collect()
 }
 
-/// Keep directly importable files: `.bok` plus natively extractable
-/// archives (`.zip` / `.tar` / `.tar.gz` / `.rar`).
+/// Keep every directly readable book layout (`.bok`, `.mdb`, `.mbok`).
+pub fn book_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
+    files
+        .iter()
+        .filter(|file| {
+            let lower = file.name.to_ascii_lowercase();
+            lower.ends_with(".bok") || lower.ends_with(".mdb") || lower.ends_with(".mbok")
+        })
+        .collect()
+}
+
+/// Keep directly importable files: `.bok` / `.mdb` / `.mbok` plus natively
+/// extractable archives (`.zip` / `.tar` / `.tar.gz` / `.rar` / `.7z`).
 pub fn downloadable_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
     files
         .iter()
         .filter(|file| crate::extract::is_importable(&file.name))
         .collect()
+}
+
+/// Download URL for one file, preferring the full URL recorded while
+/// browsing a container.
+pub fn file_url(identifier: &str, file: &ArchiveFile) -> String {
+    file.url
+        .clone()
+        .unwrap_or_else(|| download_url(identifier, &file.name))
 }
 
 /// Direct download URL for one item file.
@@ -147,6 +170,7 @@ fn url_encode_segment(segment: &str) -> String {
 
 fn fetch_text(url: &str) -> Result<String> {
     ureq::get(url)
+        .timeout(std::time::Duration::from_secs(120))
         .call()
         .map_err(|error| err(format!("GET {url}: {error}")))?
         .into_string()
@@ -157,6 +181,131 @@ fn fetch_text(url: &str) -> Result<String> {
 pub fn item_files(identifier: &str) -> Result<Vec<ArchiveFile>> {
     let url = format!("{METADATA_BASE}/{identifier}");
     parse_item_files(&fetch_text(&url)?)
+}
+
+/// List the books inside one remote container (ZIP/RAR/7z) using
+/// archive.org's public "view archive" page. Inner URLs are recorded so the
+/// downloader can fetch a single book without downloading the whole pack.
+pub fn browse_archive(identifier: &str, archive: &str) -> Result<Vec<ArchiveFile>> {
+    let encoded: String = archive
+        .split('/')
+        .map(url_encode_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    let url = format!("{DOWNLOAD_BASE}/{identifier}/{encoded}/");
+    parse_archive_listing(&fetch_text(&url)?, identifier)
+}
+
+/// Parse the server-rendered archive listing page.
+///
+/// The page contains one `<tr>` per entry:
+/// `<tr><td><a href="//archive.org/download/...">name</a><td>...<td id="size">123</tr>`.
+/// Only importable book/archive files are kept.
+pub fn parse_archive_listing(document: &str, identifier: &str) -> Result<Vec<ArchiveFile>> {
+    let marker = format!("/download/{identifier}/");
+    let mut out = Vec::new();
+    let mut rest = document;
+    while let Some(start) = rest.find("<tr>") {
+        rest = &rest[start + 4..];
+        let Some(end) = rest.find("</tr>") else {
+            break;
+        };
+        let row = &rest[..end];
+        rest = &rest[end + 5..];
+        if !row.contains("id=\"size\"") {
+            continue;
+        }
+        let Some(link_start) = row.find("<a href=\"") else {
+            continue;
+        };
+        let link = &row[link_start + 9..];
+        let Some(link_end) = link.find('"') else {
+            continue;
+        };
+        let href = &link[..link_end];
+        let after_href = &link[link_end + 1..];
+        let Some(text_start) = after_href.find('>') else {
+            continue;
+        };
+        let text = &after_href[text_start + 1..];
+        let Some(text_end) = text.find("</a>") else {
+            continue;
+        };
+        let name = decode_entities(text[..text_end].trim());
+        if name.is_empty() || !crate::extract::is_importable(&name) {
+            continue;
+        }
+        let size = row
+            .split("id=\"size\"")
+            .nth(1)
+            .and_then(|tail| tail.split('>').nth(1))
+            .map(|tail| {
+                tail.chars()
+                    .take_while(|ch| ch.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .unwrap_or(0);
+        let href = decode_entities(href);
+        let full = if let Some(rest) = href.strip_prefix("//") {
+            format!("https://{rest}")
+        } else if href.starts_with('/') {
+            format!("https://archive.org{href}")
+        } else {
+            href
+        };
+        // Rows from the page are always inside this item; keep the check to
+        // avoid navigation rows on older page layouts.
+        if !full.contains(&marker) {
+            continue;
+        }
+        out.push(ArchiveFile {
+            name,
+            size,
+            url: Some(full),
+        });
+    }
+    Ok(out)
+}
+
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find('&') {
+        out.push_str(&rest[..index]);
+        rest = &rest[index..];
+        let Some(end) = rest.find(';') else {
+            out.push_str(rest);
+            return out;
+        };
+        let entity = &rest[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .or_else(|| {
+                    entity
+                        .strip_prefix('#')
+                        .and_then(|num| num.parse::<u32>().ok())
+                })
+                .and_then(char::from_u32),
+        };
+        if let Some(ch) = decoded {
+            out.push(ch);
+            rest = &rest[end + 1..];
+        } else {
+            out.push('&');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Download one URL to a local file (streamed, no size limit issues).
@@ -209,6 +358,26 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].identifier, "5201Bok");
         assert_eq!(items[1].title, "fallback-id");
+    }
+
+    #[test]
+    fn parses_browse_listing() {
+        let html = r#"
+        <tr><td><a href="//archive.org/download/item/pack.zip/nested/10.mdb">nested/10.mdb</a><td><td>2020<td id="size">116736</tr>
+        <tr><td><a href="//archive.org/download/item/pack.zip/nested/notes.txt">nested/notes.txt</a><td><td>2020<td id="size">10</tr>
+        <tr><td><a href="//archive.org/download/item/pack.zip/nested/11.bok">nested/11.bok</a><td><td>2020<td id="size">200</tr>
+        "#;
+        let files = parse_archive_listing(html, "item").unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "nested/10.mdb");
+        assert_eq!(files[0].size, 116736);
+        assert!(files[0].url.as_deref().unwrap().ends_with("nested/10.mdb"));
+        assert_eq!(files[1].name, "nested/11.bok");
+    }
+
+    #[test]
+    fn decodes_html_entities() {
+        assert_eq!(decode_entities("a &amp; b &#x27;c&#x27;"), "a & b 'c'");
     }
 
     #[test]
