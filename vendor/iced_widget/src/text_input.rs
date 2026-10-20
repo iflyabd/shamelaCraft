@@ -315,7 +315,10 @@ where
             font,
             line_height: self.line_height,
             content: self.placeholder.as_str(),
-            bounds: Size::new(f32::INFINITY, text_bounds.height),
+            // A finite width keeps right-to-left text on screen: cosmic-text
+            // aligns an RTL line to the right edge of the layout width, so an
+            // infinite width would paint Arabic outside the input.
+            bounds: Size::new(text_bounds.width.max(1.0), text_bounds.height),
             size: text_size,
             horizontal_alignment: alignment::Horizontal::Left,
             vertical_alignment: alignment::Vertical::Center,
@@ -1516,7 +1519,7 @@ fn replace_paragraph<Renderer>(
         font,
         line_height,
         content: &value.to_string(),
-        bounds: Size::new(f32::INFINITY, text_bounds.height),
+        bounds: Size::new(text_bounds.width.max(1.0), text_bounds.height),
         size: text_size,
         horizontal_alignment: alignment::Horizontal::Left,
         vertical_alignment: alignment::Vertical::Top,
