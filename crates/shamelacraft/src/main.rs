@@ -3515,14 +3515,10 @@ fn source_row(state: &State, index: usize) -> Element<'static, Message> {
         item_size(state.font_size) - 1.0,
         state.chrome(),
     );
-    Tooltip::new(
-        content,
-        ar_boxed(source.label.clone(), 12.0),
-        Position::Left,
-    )
-    .gap(4)
-    .style(tooltip_style)
-    .into()
+    Tooltip::new(content, ar_boxed(source.label, 12.0), Position::Left)
+        .gap(4)
+        .style(tooltip_style)
+        .into()
 }
 
 /// Narrow variant for the side panel: one compact clickable line plus a
@@ -3537,14 +3533,10 @@ fn source_row_panel(state: &State, index: usize) -> Element<'static, Message> {
         item_size(state.font_size) - 3.0,
         state.chrome(),
     );
-    Tooltip::new(
-        content,
-        ar_boxed(source.label.clone(), 12.0),
-        Position::Left,
-    )
-    .gap(4)
-    .style(tooltip_style)
-    .into()
+    Tooltip::new(content, ar_boxed(source.label, 12.0), Position::Left)
+        .gap(4)
+        .style(tooltip_style)
+        .into()
 }
 
 /// Scrollable source catalog with format group headers.
