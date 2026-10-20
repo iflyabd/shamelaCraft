@@ -3601,16 +3601,13 @@ fn file_row_panel(
                 .into(),
         );
     }
-    cells.push(
-        list_row(
-            label,
-            false,
-            Message::DownloadFile(file.name.clone()),
-            item_size(state.font_size) - 2.0,
-            state.chrome(),
-        )
-        .into(),
-    );
+    cells.push(list_row(
+        label,
+        false,
+        Message::DownloadFile(file.name.clone()),
+        item_size(state.font_size) - 2.0,
+        state.chrome(),
+    ));
     row(cells).spacing(4).width(Length::Fill).into()
 }
 
