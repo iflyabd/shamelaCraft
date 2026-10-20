@@ -12,12 +12,20 @@ use crate::{err, Result};
 
 const METADATA_BASE: &str = "https://archive.org/metadata";
 const DOWNLOAD_BASE: &str = "https://archive.org/download";
+const SEARCH_BASE: &str = "https://archive.org/advancedsearch.php";
 
 /// One file inside an archive.org item.
 #[derive(Debug, Clone)]
 pub struct ArchiveFile {
     pub name: String,
     pub size: u64,
+}
+
+/// One archive.org item returned by a title search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveItem {
+    pub identifier: String,
+    pub title: String,
 }
 
 /// Parse an archive.org metadata document into its file list.
@@ -45,6 +53,57 @@ pub fn parse_item_files(document: &str) -> Result<Vec<ArchiveFile>> {
         });
     }
     Ok(out)
+}
+
+/// Parse archive.org advanced-search JSON into item hits.
+pub fn parse_search_items(document: &str) -> Result<Vec<ArchiveItem>> {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|error| crate::err(format!("search JSON: {error}")))?;
+    let docs = value
+        .pointer("/response/docs")
+        .and_then(|node| node.as_array())
+        .ok_or_else(|| err("search JSON has no response.docs[] array"))?;
+    let mut out = Vec::with_capacity(docs.len());
+    for doc in docs {
+        let Some(identifier) = doc.get("identifier").and_then(|node| node.as_str()) else {
+            continue;
+        };
+        let title = doc
+            .get("title")
+            .and_then(|node| node.as_str())
+            .unwrap_or(identifier);
+        out.push(ArchiveItem {
+            identifier: identifier.to_string(),
+            title: title.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// Search public archive.org uploads that carry Shamela `.bok` books.
+///
+/// The query is a book title, not an item id. Results are limited to text
+/// items whose titles mention the book format (`bok` / `بوك` / `بصيغة بوك`),
+/// which targets the large keyless Shamela mirrors on archive.org.
+pub fn search_items(query: &str, rows: usize) -> Result<Vec<ArchiveItem>> {
+    let clean: String = query
+        .chars()
+        .map(|ch| if matches!(ch, '"' | '\\') { ' ' } else { ch })
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = rows.clamp(1, 50);
+    let lucene = format!(
+        "title:(\"{clean}\") AND mediatype:texts \
+         AND (title:(bok) OR title:(\"بوك\") OR title:(\"بصيغة بوك\"))"
+    );
+    let url = format!(
+        "{SEARCH_BASE}?q={}&fl%5B%5D=identifier&fl%5B%5D=title&rows={rows}&page=1&output=json&sort%5B%5D=downloads%20desc",
+        url_encode_segment(&lucene)
+    );
+    parse_search_items(&fetch_text(&url)?)
 }
 
 /// Keep only `.bok` files (case-insensitive).
@@ -133,6 +192,23 @@ mod tests {
         assert_eq!(files.len(), 3);
         assert_eq!(files[0].size, 12345);
         assert_eq!(bok_files(&files).len(), 2);
+    }
+
+    #[test]
+    fn parses_search_fixture() {
+        let document = r#"{
+            "response": {
+                "docs": [
+                    {"identifier": "5201Bok", "title": "5201 Bok صحيح البخاري"},
+                    {"identifier": "fallback-id"},
+                    {"title": "no identifier"}
+                ]
+            }
+        }"#;
+        let items = parse_search_items(document).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].identifier, "5201Bok");
+        assert_eq!(items[1].title, "fallback-id");
     }
 
     #[test]

@@ -244,6 +244,10 @@ enum Message {
     DlClearFinished,
     DlOpenFolder,
     DlPresetSource(String),
+    DlQueryInput(String),
+    DlSearch,
+    DlClearResults,
+    DlOpenItem(String),
     AccentNext,
     ToggleCorners,
     LineBigger,
@@ -370,6 +374,8 @@ struct State {
     dl_files: Vec<shamela_import::archive::ArchiveFile>,
     dl_selected: std::collections::BTreeSet<String>,
     dl_filter: String,
+    dl_query: String,
+    dl_results: Vec<shamela_import::archive::ArchiveItem>,
     dl_queue: Vec<QueueItem>,
     dl_next_id: usize,
     show_downloads: bool,
@@ -444,6 +450,8 @@ impl Default for State {
             dl_files: Vec::new(),
             dl_selected: std::collections::BTreeSet::new(),
             dl_filter: String::new(),
+            dl_query: String::new(),
+            dl_results: Vec::new(),
             font_size: 24.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
@@ -2370,7 +2378,10 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DownloadIdInput(id) => {
             state.dl_id = parse_item_id(&id);
         }
-        Message::DownloadList => refresh_download_list(state),
+        Message::DownloadList => {
+            state.dl_results.clear();
+            refresh_download_list(state);
+        }
         Message::DownloadFile(name) => enqueue_file(state, name),
         Message::DownloadAll => {
             let files: Vec<String> = state.dl_files.iter().map(|f| f.name.clone()).collect();
@@ -2430,6 +2441,33 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::DlPresetSource(id) => {
             state.dl_id = id;
+            state.dl_results.clear();
+            refresh_download_list(state);
+        }
+        Message::DlQueryInput(text) => state.dl_query = text,
+        Message::DlSearch => {
+            let query = state.dl_query.trim().to_string();
+            if query.is_empty() {
+                state.status = String::from("type a book title to search archive.org");
+            } else {
+                match shamela_import::archive::search_items(&query, 30) {
+                    Ok(items) => {
+                        let count = items.len();
+                        state.dl_results = items;
+                        state.status = format!("archive.org: {count} book item(s) for \"{query}\"");
+                    }
+                    Err(error) => {
+                        state.dl_results.clear();
+                        state.status = format!("archive search failed: {error}");
+                    }
+                }
+            }
+        }
+        Message::DlClearResults => state.dl_results.clear(),
+        Message::DlOpenItem(id) => {
+            state.dl_id = id;
+            state.dl_results.clear();
+            state.dl_filter.clear();
             refresh_download_list(state);
         }
         Message::AccentNext => {
@@ -3078,9 +3116,12 @@ fn bookmark_list(state: &State) -> Element<'_, Message> {
 
 /// Curated keyless archive.org sources (id, Arabic label).
 const DL_PRESETS: &[(&str, &str)] = &[
-    ("mutunulhadith", "متون الحديث (١٧٢ كتاب)"),
-    ("kotobe-mojahed-din-maktab-shamele", "مكتبة كتب — حزمة"),
-    ("ShamelaLibrary348-1", "الشاملة الرسمية — حزمة"),
+    ("mutunulhadith", "متون الحديث (١٧٢)"),
+    ("shamelah-books", "الشاملة 2.0 (٨٠+)"),
+    ("ghazali3shamela", "كتب الغزالي (٣٢)"),
+    ("AlbanyBok", "كتب الألباني (٩٤)"),
+    ("ahl_sunna_books_shamela", "أهل السنة (١٥١)"),
+    ("kotobe-mojahed-din-maktab-shamele", "مكتبة المجاهد — RAR"),
 ];
 
 /// One source-file row: selection box, download button, size, kind, name.
@@ -4394,15 +4435,32 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     ]
     .spacing(6);
 
-    let mut chips: Vec<Element<'_, Message>> = vec![ar_boxed(tr(lang, "preset_sources"), 13.0)];
-    for (id, label) in DL_PRESETS {
-        chips.push(
-            button(ar_boxed(*label, 12.0))
-                .on_press(Message::DlPresetSource(String::from(*id)))
-                .into(),
-        );
+    let mut preset_rows: Vec<Element<'_, Message>> = Vec::new();
+    for (index, chunk) in DL_PRESETS.chunks(3).enumerate() {
+        let mut chips: Vec<Element<'_, Message>> = Vec::new();
+        if index == 0 {
+            chips.push(ar_boxed(tr(lang, "preset_sources"), 13.0));
+        }
+        for (id, label) in chunk {
+            chips.push(
+                button(ar_boxed(*label, 12.0))
+                    .on_press(Message::DlPresetSource(String::from(*id)))
+                    .into(),
+            );
+        }
+        preset_rows.push(row(chips).spacing(6).into());
     }
-    let presets = row(chips).spacing(6);
+    let presets = column(preset_rows).spacing(4);
+
+    let archive_search = text_input(tr(lang, "archive_search_hint"), state.dl_query.as_str())
+        .on_input(Message::DlQueryInput)
+        .on_submit(Message::DlSearch)
+        .padding(7);
+    let search_row = row![
+        archive_search,
+        button(ar_boxed(tr(lang, "search_archive"), 13.0)).on_press(Message::DlSearch),
+    ]
+    .spacing(6);
 
     let total = state.dl_files.len();
     let visible = visible_files(state);
@@ -4507,41 +4565,77 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
             .into(),
         );
     }
-    let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(170.0));
+    let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(145.0));
 
-    let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
-        .on_input(Message::DlFilterInput)
-        .padding(6)
-        .width(Length::Fixed(220.0));
-    let files_header = row![
-        filter,
-        ar_boxed(tr(lang, "filter_word"), 12.0),
-        Space::with_width(Length::Fill),
-        ar_boxed(
-            format!(
-                "{} — {} {}/{}",
-                tr(lang, "files_of"),
-                tr(lang, "shown_of"),
-                visible.len(),
-                total
-            ),
-            13.0,
-        ),
-    ]
-    .spacing(6);
-    let mut files: Vec<Element<'_, Message>> = Vec::new();
-    for file in &visible {
-        files.push(file_row(state, file));
-    }
-    if files.is_empty() {
-        files.push(ar_boxed(tr(lang, "no_files"), 14.0));
-    }
-    let file_list = scrollable(column(files).spacing(4)).height(Length::Fixed(170.0));
+    let (files_header, file_list): (Element<'_, Message>, Element<'_, Message>) =
+        if state.dl_results.is_empty() {
+            let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
+                .on_input(Message::DlFilterInput)
+                .padding(6)
+                .width(Length::Fixed(220.0));
+            let header = row![
+                filter,
+                ar_boxed(tr(lang, "filter_word"), 12.0),
+                Space::with_width(Length::Fill),
+                ar_boxed(
+                    format!(
+                        "{} — {} {}/{}",
+                        tr(lang, "files_of"),
+                        tr(lang, "shown_of"),
+                        visible.len(),
+                        total
+                    ),
+                    13.0,
+                ),
+            ]
+            .spacing(6);
+            let mut files: Vec<Element<'_, Message>> = Vec::new();
+            for file in &visible {
+                files.push(file_row(state, file));
+            }
+            if files.is_empty() {
+                files.push(ar_boxed(tr(lang, "no_files"), 14.0));
+            }
+            let items = scrollable(column(files).spacing(4)).height(Length::Fixed(145.0));
+            (header.into(), items.into())
+        } else {
+            let mut rows: Vec<Element<'_, Message>> = Vec::new();
+            for item in &state.dl_results {
+                rows.push(
+                    row![
+                        button(ar_boxed(tr(lang, "open"), 12.0))
+                            .on_press(Message::DlOpenItem(item.identifier.clone())),
+                        ar_boxed(trim_text(&item.identifier, 22), 11.0),
+                        Space::with_width(Length::Fill),
+                        ar_boxed(trim_text(&item.title, 58), 13.0),
+                    ]
+                    .spacing(6)
+                    .width(Length::Fill)
+                    .into(),
+                );
+            }
+            let header = row![
+                button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
+                Space::with_width(Length::Fill),
+                ar_boxed(
+                    format!(
+                        "{} — {}",
+                        tr(lang, "search_results"),
+                        state.dl_results.len()
+                    ),
+                    13.0,
+                ),
+            ]
+            .spacing(6);
+            let items = scrollable(column(rows).spacing(4)).height(Length::Fixed(145.0));
+            (header.into(), items.into())
+        };
 
     let body = column![
         title,
         source_row,
         presets,
+        search_row,
         controls,
         controls2,
         summary,
@@ -4550,7 +4644,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         files_header,
         file_list,
     ]
-    .spacing(8)
+    .spacing(6)
     .padding(4)
     .width(Length::Fixed(640.0));
     let card = container(body)
