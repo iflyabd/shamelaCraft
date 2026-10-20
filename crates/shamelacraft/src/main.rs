@@ -449,6 +449,9 @@ impl Default for State {
             status: String::from("افتح ملف master.db لبدء التصفح"),
         };
         load_settings(&mut state);
+        let (reader_text, reader_bg) = reader_colors(state.theme_kind);
+        state.reader_text = reader_text;
+        state.reader_bg = reader_bg;
         if state.reopen_last {
             if let Ok(saved) = std::fs::read_to_string(last_db_path()) {
                 let path = PathBuf::from(saved.trim());
@@ -582,6 +585,20 @@ impl State {
     }
 }
 
+/// Hover labels: black box with white text, in every theme.
+fn tooltip_style(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.04, 0.04, 0.05))),
+        text_color: Some(Color::WHITE),
+        border: iced::border::Border {
+            color: Color::from_rgb(0.35, 0.35, 0.40),
+            width: 1.0,
+            radius: iced::border::Radius::new(6.0),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Icon toolbar button with bilingual hover label.
 fn tool_btn(
     icon: &'static str,
@@ -598,6 +615,7 @@ fn tool_btn(
         ar(label, 13.0),
         Position::Bottom,
     )
+    .style(tooltip_style)
     .gap(8.0)
     .into()
 }
@@ -1190,6 +1208,14 @@ fn refresh_download_list(state: &mut State) {
     }
 }
 
+/// Load the configured source once, so download buttons and the popup have
+/// the complete book list ready.
+fn ensure_source_files(state: &mut State) {
+    if state.dl_files.is_empty() && !state.dl_id.trim().is_empty() {
+        refresh_download_list(state);
+    }
+}
+
 /// Queue a download; starts it immediately when the lane is free.
 fn enqueue(state: &mut State, label: String, url: String, dest: PathBuf, after: AfterDl) {
     let id = state.dl_next_id;
@@ -1606,6 +1632,7 @@ fn download_tab(state: &mut State, index: usize) {
         }
     }
 
+    ensure_source_files(state);
     let key = match_key(&title);
     if !key.is_empty() {
         let hit = state
@@ -1802,6 +1829,17 @@ fn bg_colors() -> [Color; 4] {
         Color::from_rgb(0.95, 0.91, 0.82),
         Color::from_rgb(0.92, 0.94, 0.97),
     ]
+}
+
+/// Page text and background that follow the active light/dark theme.
+fn reader_colors(kind: AppTheme) -> (Color, Color) {
+    match kind {
+        AppTheme::Light => (Color::BLACK, Color::WHITE),
+        AppTheme::Dark => (
+            Color::from_rgb(0.92, 0.92, 0.95),
+            Color::from_rgb(0.11, 0.11, 0.14),
+        ),
+    }
 }
 
 fn next_color(list: &[Color], current: Color) -> Color {
@@ -2320,6 +2358,9 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             if panel == Panel::Control {
                 refresh_control(state);
             }
+            if panel == Panel::Downloads {
+                ensure_source_files(state);
+            }
         }
         Message::BookmarkAdd => add_bookmark(state),
         Message::BookmarkRemove(id) => remove_bookmark(state, id),
@@ -2347,9 +2388,13 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DownloadTab(index) => download_tab(state, index),
         Message::DownloadOpen => {
             state.show_downloads = true;
+            ensure_source_files(state);
         }
         Message::DlToggle => {
             state.show_downloads = !state.show_downloads;
+            if state.show_downloads {
+                ensure_source_files(state);
+            }
         }
         Message::DlTick => poll_downloads(state),
         Message::DlRemove(id) => remove_job(state, id),
@@ -2456,6 +2501,9 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
                 AppTheme::Light => AppTheme::Dark,
                 AppTheme::Dark => AppTheme::Light,
             };
+            let (reader_text, reader_bg) = reader_colors(state.theme_kind);
+            state.reader_text = reader_text;
+            state.reader_bg = reader_bg;
         }
         Message::FocusBook => focus_book(state),
         Message::SearchBook => {
@@ -2548,8 +2596,9 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.accent = Accent::Royal;
             state.rounded = true;
             state.line_height = 1.6;
-            state.reader_text = Color::BLACK;
-            state.reader_bg = Color::WHITE;
+            let (reader_text, reader_bg) = reader_colors(state.theme_kind);
+            state.reader_text = reader_text;
+            state.reader_bg = reader_bg;
             state.search_opts = NormalizeOptions::default();
             rebuild_index(state);
             state.status = String::from("settings reset");
@@ -3034,10 +3083,6 @@ const DL_PRESETS: &[(&str, &str)] = &[
     ("ShamelaLibrary348-1", "الشاملة الرسمية — حزمة"),
 ];
 
-/// How many source-file rows each view draws (further rows need filtering).
-const PANEL_FILE_ROWS: usize = 120;
-const MODAL_FILE_ROWS: usize = 250;
-
 /// One source-file row: selection box, download button, size, kind, name.
 /// One source-file row: selection box, download button, size, kind, name.
 fn file_row(
@@ -3136,7 +3181,7 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
             item_size(state.font_size) - 2.0,
         ));
     }
-    for file in visible.iter().take(PANEL_FILE_ROWS) {
+    for file in &visible {
         items.push(file_row_panel(state, file));
     }
     scrollable(column(items).spacing(6))
@@ -3352,6 +3397,7 @@ fn panel_tabs(state: &State) -> Element<'_, Message> {
                 ar(label, 13.0),
                 Position::Bottom,
             )
+            .style(tooltip_style)
             .into(),
         );
     }
@@ -3651,6 +3697,7 @@ fn reader(state: &State) -> Element<'_, Message> {
                         ar(tr(state.lang, "download"), 12.0),
                         Position::Bottom,
                     )
+                    .style(tooltip_style)
                     .gap(6.0)
                     .into(),
                 );
@@ -4483,7 +4530,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     ]
     .spacing(6);
     let mut files: Vec<Element<'_, Message>> = Vec::new();
-    for file in visible.iter().take(MODAL_FILE_ROWS) {
+    for file in &visible {
         files.push(file_row(state, file));
     }
     if files.is_empty() {
