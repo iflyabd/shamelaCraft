@@ -1950,6 +1950,9 @@ fn title_core(content: &str) -> String {
     title_tokens(content).join("")
 }
 
+/// Shortest label that may stand in for a longer title.
+const TITLE_MIN_MATCH: usize = 8;
+
 /// How well a wanted title matches a label. Lower is better, `None` means no
 /// match at all. The score also orders the result list, so the edition the
 /// user opened comes first.
@@ -1962,13 +1965,18 @@ fn title_score(wanted: &str, label: &str) -> Option<u8> {
     if key == other {
         return Some(0);
     }
-    // One title is the beginning of the other.
-    if other.starts_with(&key) || key.starts_with(&other) {
-        return Some(1);
+    // The label carries the searched words: a keyword or a whole title.
+    if other.contains(&key) {
+        return Some(if other.starts_with(&key) { 1 } else { 2 });
     }
-    // One title sits inside the other (extra edition or author words).
-    if other.contains(&key) || key.contains(&other) {
-        return Some(2);
+    // The label is the shorter spelling of the wanted title. Only a real book
+    // name may stand in for a longer one, or every short word would match.
+    if key.contains(&other) {
+        return if other.chars().count() >= TITLE_MIN_MATCH {
+            Some(if key.starts_with(&other) { 1 } else { 2 })
+        } else {
+            None
+        };
     }
     // Same title, different edition marks.
     let core = title_core(wanted);
@@ -1977,7 +1985,9 @@ fn title_score(wanted: &str, label: &str) -> Option<u8> {
         if core == other_core {
             return Some(2);
         }
-        if core.contains(&other_core) || other_core.contains(&core) {
+        if (core.contains(&other_core) || other_core.contains(&core))
+            && other_core.chars().count() >= TITLE_MIN_MATCH
+        {
             return Some(3);
         }
     }
@@ -6528,7 +6538,12 @@ mod tests {
             Some(1)
         );
         // the catalog title may be the longer one
-        assert_eq!(title_score("صحيح البخاري", "البخاري"), Some(2));
+        assert_eq!(
+            title_score("صحيح البخاري", "صحيح البخاري في صحيح البخاري"),
+            Some(1)
+        );
+        // a short word may not stand in for a whole title
+        assert_eq!(title_score("صحيح البخاري", "البخاري"), None);
         // a different book must not match
         assert!(title_score("كتاب الفقه", "كتاب الحديث").is_none());
     }
