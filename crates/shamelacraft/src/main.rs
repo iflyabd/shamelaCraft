@@ -89,6 +89,25 @@ enum PaneKind {
     Side,
 }
 
+/// How the side pane shows its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SideMode {
+    /// Tabbed panels: sections, authors, bookmarks, Quran, downloads, control.
+    #[default]
+    Tabs,
+    /// One tree: sections with the books inside them, expandable.
+    Tree,
+    /// Two resizable trees: the catalog and the index of the open book.
+    TwoTrees,
+}
+
+/// Sections of the side pane in the two-tree layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SideKind {
+    Catalog,
+    Index,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Panel {
     #[default]
@@ -293,6 +312,13 @@ enum Message {
     CopyPage,
     LastSearch,
     PaneResized(pane_grid::ResizeEvent),
+    SideResized(pane_grid::ResizeEvent),
+    TogglePane(PaneKind),
+    ClosePane(PaneKind),
+    SideModePick(SideMode),
+    SideModeCycle,
+    ResetLayout,
+    ToggleSection(i64),
     ToggleToc,
     ToggleNotes,
     ToggleSettings,
@@ -371,6 +397,15 @@ struct State {
     note_input: String,
     notes: Vec<shamela_content::notes::Note>,
     panes: pane_grid::State<PaneKind>,
+    /// Inner split of the side pane (catalog tree / book index tree).
+    side_panes: pane_grid::State<SideKind>,
+    /// Layout of the side pane.
+    side_mode: SideMode,
+    /// Which side panes are visible.
+    show_books_pane: bool,
+    show_side_pane: bool,
+    /// Section opened in the catalog tree.
+    expanded_category: Option<i64>,
     show_toc: bool,
     show_notes: bool,
     show_tashkeel: bool,
@@ -446,7 +481,12 @@ impl Default for State {
             tafsir_lines: Vec::new(),
             note_input: String::new(),
             notes: Vec::new(),
-            panes: init_panes(),
+            panes: init_panes(true, true),
+            side_panes: init_side_panes(),
+            side_mode: SideMode::Tabs,
+            show_books_pane: true,
+            show_side_pane: true,
+            expanded_category: None,
             show_toc: true,
             show_notes: true,
             show_tashkeel: true,
@@ -661,15 +701,72 @@ fn tool_btn(
 }
 
 /// Reader | books | side navigation, user-resizable via drag handles.
-fn init_panes() -> pane_grid::State<PaneKind> {
+fn init_panes(show_books: bool, show_side: bool) -> pane_grid::State<PaneKind> {
     let (mut panes, reader) = pane_grid::State::new(PaneKind::Reader);
-    if let Some((books, first)) = panes.split(Axis::Vertical, reader, PaneKind::Books) {
-        if let Some((_, second)) = panes.split(Axis::Vertical, books, PaneKind::Side) {
-            panes.resize(first, 0.58);
-            panes.resize(second, 0.42);
+    match (show_books, show_side) {
+        (true, true) => {
+            if let Some((books, first)) = panes.split(Axis::Vertical, reader, PaneKind::Books) {
+                if let Some((_, second)) = panes.split(Axis::Vertical, books, PaneKind::Side) {
+                    panes.resize(first, 0.58);
+                    panes.resize(second, 0.42);
+                }
+            }
         }
+        (true, false) => {
+            if let Some((_, first)) = panes.split(Axis::Vertical, reader, PaneKind::Books) {
+                panes.resize(first, 0.62);
+            }
+        }
+        (false, true) => {
+            if let Some((_, first)) = panes.split(Axis::Vertical, reader, PaneKind::Side) {
+                panes.resize(first, 0.62);
+            }
+        }
+        (false, false) => {}
     }
     panes
+}
+
+/// Catalog tree over book index tree inside the side pane.
+fn init_side_panes() -> pane_grid::State<SideKind> {
+    let (mut panes, catalog) = pane_grid::State::new(SideKind::Catalog);
+    if let Some((_, split)) = panes.split(Axis::Horizontal, catalog, SideKind::Index) {
+        panes.resize(split, 0.6);
+    }
+    panes
+}
+
+/// True when a pane of that kind is on screen.
+fn pane_visible(state: &State, kind: PaneKind) -> bool {
+    state.panes.iter().any(|(_, pane_kind)| *pane_kind == kind)
+}
+
+/// Show or hide one pane, keeping the rest of the layout intact.
+fn set_pane_visible(state: &mut State, kind: PaneKind, visible: bool) {
+    let existing = state
+        .panes
+        .iter()
+        .find(|(_, pane_kind)| *pane_kind == kind)
+        .map(|(pane, _)| *pane);
+    match (existing, visible) {
+        (Some(pane), false) => {
+            let _ = state.panes.close(pane);
+        }
+        (None, true) => {
+            let target = state
+                .panes
+                .iter()
+                .find(|(_, pane_kind)| *pane_kind == PaneKind::Reader)
+                .map(|(pane, _)| *pane)
+                .or_else(|| state.panes.iter().next().map(|(pane, _)| *pane));
+            if let Some(target) = target {
+                if let Some((_, split)) = state.panes.split(Axis::Vertical, target, kind) {
+                    state.panes.resize(split, 0.5);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn data_dir() -> PathBuf {
@@ -775,8 +872,13 @@ fn save_settings(state: &State) {
         Accent::Maroon => "maroon",
         Accent::Amber => "amber",
     };
+    let side_mode = match state.side_mode {
+        SideMode::Tabs => "tabs",
+        SideMode::Tree => "tree",
+        SideMode::TwoTrees => "twotrees",
+    };
     let body = format!(
-        "font={}\ntheme={theme}\nlang={lang}\naccent={accent}\nrounded={}\nline={:.1}\n\ntashkeel={}\nhamza={}\nsearch_tashkeel={}\ntatweel={}\nreopen={}\nnotify={}\n",
+        "font={}\ntheme={theme}\nlang={lang}\naccent={accent}\nrounded={}\nline={:.1}\n\ntashkeel={}\nhamza={}\nsearch_tashkeel={}\ntatweel={}\nreopen={}\nnotify={}\n\nside_mode={side_mode}\nbooks_pane={}\nside_pane={}\n",
         state.font_size,
         u8::from(state.rounded),
         state.line_height,
@@ -786,6 +888,8 @@ fn save_settings(state: &State) {
         u8::from(state.search_opts.strip_tatweel),
         u8::from(state.reopen_last),
         u8::from(state.notify_search),
+        u8::from(state.show_books_pane),
+        u8::from(state.show_side_pane),
     );
     let _ = std::fs::write(settings_path(), body);
 }
@@ -839,9 +943,19 @@ fn load_settings(state: &mut State) {
             "tatweel" => state.search_opts.strip_tatweel = value == "1",
             "reopen" => state.reopen_last = value == "1",
             "notify" => state.notify_search = value == "1",
+            "side_mode" => {
+                state.side_mode = match value {
+                    "tree" => SideMode::Tree,
+                    "twotrees" => SideMode::TwoTrees,
+                    _ => SideMode::Tabs,
+                }
+            }
+            "books_pane" => state.show_books_pane = value == "1",
+            "side_pane" => state.show_side_pane = value == "1",
             _ => {}
         }
     }
+    state.panes = init_panes(state.show_books_pane, state.show_side_pane);
 }
 
 fn bookmarks_path() -> PathBuf {
@@ -2681,6 +2795,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             | Message::ReaderBgNext
             | Message::ToggleReopenLast
             | Message::ToggleNotifySearch
+            | Message::TogglePane(_)
+            | Message::ClosePane(_)
+            | Message::SideModePick(_)
+            | Message::SideModeCycle
+            | Message::ResetLayout
             | Message::ResetAll
     );
     let task = apply(state, message);
@@ -3043,6 +3162,61 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::PaneResized(event) => {
             state.panes.resize(event.split, event.ratio);
+        }
+        Message::SideResized(event) => {
+            state.side_panes.resize(event.split, event.ratio);
+        }
+        Message::TogglePane(kind) => {
+            let visible = match kind {
+                PaneKind::Books => !state.show_books_pane,
+                PaneKind::Side => !state.show_side_pane,
+                PaneKind::Reader => true,
+            };
+            match kind {
+                PaneKind::Books => state.show_books_pane = visible,
+                PaneKind::Side => state.show_side_pane = visible,
+                PaneKind::Reader => {}
+            }
+            set_pane_visible(state, kind, visible);
+        }
+        Message::ClosePane(kind) => {
+            match kind {
+                PaneKind::Books => state.show_books_pane = false,
+                PaneKind::Side => state.show_side_pane = false,
+                PaneKind::Reader => {}
+            }
+            set_pane_visible(state, kind, false);
+        }
+        Message::SideModePick(mode) => {
+            state.side_mode = mode;
+        }
+        Message::SideModeCycle => {
+            state.side_mode = match state.side_mode {
+                SideMode::Tabs => SideMode::Tree,
+                SideMode::Tree => SideMode::TwoTrees,
+                SideMode::TwoTrees => SideMode::Tabs,
+            };
+        }
+        Message::ResetLayout => {
+            state.show_books_pane = true;
+            state.show_side_pane = true;
+            state.side_mode = SideMode::Tabs;
+            state.expanded_category = None;
+            state.panes = init_panes(true, true);
+            state.side_panes = init_side_panes();
+        }
+        Message::ToggleSection(id) => {
+            if state.expanded_category == Some(id) {
+                state.expanded_category = None;
+            } else {
+                state.expanded_category = Some(id);
+                state.active_category = Some(id);
+                state.active_author = None;
+                state.query.clear();
+                state.results.clear();
+                state.author_results.clear();
+                load_category(state);
+            }
         }
         Message::ToggleToc => {
             state.show_toc = !state.show_toc;
@@ -4197,6 +4371,152 @@ fn downloads_panel(state: &State) -> Element<'_, Message> {
 }
 
 /// Books of the picked section (middle sub-panel).
+/// Books pane: title with a close button, then the list of books.
+fn books_pane(state: &State) -> Element<'_, Message> {
+    let close: Element<'_, Message> = Tooltip::new(
+        button(ticon("x", 14.0)).on_press(Message::ClosePane(PaneKind::Books)),
+        ar_boxed(tr(state.lang, "close_pane"), 12.0),
+        Position::Left,
+    )
+    .gap(4)
+    .style(tooltip_style)
+    .into();
+    let header = row![
+        ar(tr(state.lang, "books"), title_size(state.font_size)),
+        Space::with_width(Length::Fill),
+        close,
+    ]
+    .spacing(6);
+    column![header, books_panel(state)]
+        .spacing(4)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Side pane: close button, the chosen layout and the panel tabs.
+fn side_pane(state: &State) -> Element<'_, Message> {
+    let close: Element<'_, Message> = Tooltip::new(
+        button(ticon("x", 14.0)).on_press(Message::ClosePane(PaneKind::Side)),
+        ar_boxed(tr(state.lang, "close_pane"), 12.0),
+        Position::Left,
+    )
+    .gap(4)
+    .style(tooltip_style)
+    .into();
+    let header = row![Space::with_width(Length::Fill), close].spacing(6);
+    let body: Element<'_, Message> = match state.side_mode {
+        SideMode::Tabs => sidebar(state),
+        SideMode::Tree => catalog_tree(state),
+        SideMode::TwoTrees => two_trees(state),
+    };
+    let tabs: Element<'_, Message> = if matches!(state.side_mode, SideMode::Tabs) {
+        panel_tabs(state)
+    } else {
+        Space::with_height(Length::Fixed(0.0)).into()
+    };
+    column![header, body, tabs]
+        .spacing(4)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Catalog tree: every section, expandable to the books inside it.
+fn catalog_tree(state: &State) -> Element<'_, Message> {
+    let size = item_size(state.font_size);
+    let mut items: Vec<Element<'_, Message>> =
+        vec![ar(tr(state.lang, "sections"), title_size(state.font_size))];
+    for category in &state.categories {
+        let expanded = state.expanded_category == Some(category.id);
+        let marker = if expanded { "▾" } else { "▸" };
+        items.push(list_row(
+            format!("{marker} {}", category.name),
+            Some(category.id) == state.active_category,
+            Message::ToggleSection(category.id),
+            size,
+            state.chrome(),
+        ));
+        if expanded && state.active_category == Some(category.id) {
+            if state.books.is_empty() {
+                items.push(ar(tr(state.lang, "no_results"), size));
+            }
+            for book in state.books.iter().take(200) {
+                items.push(book_row(state, book));
+            }
+        }
+    }
+    scrollable(column(items).spacing(4).width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Index tree: the table of contents of the open book.
+fn index_tree(state: &State) -> Element<'_, Message> {
+    let size = (state.font_size - 4.0).max(12.0);
+    let mut items: Vec<Element<'_, Message>> = vec![ar(
+        tr(state.lang, "book_index"),
+        title_size(state.font_size),
+    )];
+    let Some(tab) = active_reader(state) else {
+        items.push(ar(tr(state.lang, "choose_book"), size));
+        return scrollable(column(items).spacing(4).width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    };
+    let mut flat: Vec<(usize, &TocNode)> = Vec::new();
+    flatten_toc(&tab.toc, 0, &mut flat);
+    let here = tab
+        .pages
+        .get(tab.index)
+        .map(|page| page.id.to_string())
+        .unwrap_or_default();
+    for (depth, node) in flat {
+        let label = format!("{}{}", "  ".repeat(depth), node.content);
+        let selected = !here.is_empty() && node.page.as_deref() == Some(here.as_str());
+        match node
+            .page
+            .as_deref()
+            .and_then(|raw| tab.pages.iter().position(|page| page.id.to_string() == raw))
+        {
+            Some(index) => items.push(list_row(
+                label,
+                selected,
+                Message::TocJump(index),
+                size,
+                state.chrome(),
+            )),
+            None => items.push(ar(label.as_str(), size)),
+        }
+    }
+    scrollable(column(items).spacing(2).width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Flatten a table of contents into depth/entry pairs.
+fn flatten_toc<'a>(nodes: &'a [TocNode], depth: usize, out: &mut Vec<(usize, &'a TocNode)>) {
+    for node in nodes {
+        out.push((depth, node));
+        flatten_toc(&node.children, depth + 1, out);
+    }
+}
+
+/// Two resizable trees inside the side pane: catalog and book index.
+fn two_trees(state: &State) -> Element<'_, Message> {
+    pane_grid::PaneGrid::new(&state.side_panes, |_pane, content, _| {
+        pane_grid::Content::new(match content {
+            SideKind::Catalog => catalog_tree(state),
+            SideKind::Index => index_tree(state),
+        })
+    })
+    .spacing(4)
+    .height(Length::Fill)
+    .on_resize(8.0, Message::SideResized)
+    .into()
+}
+
 fn books_panel(state: &State) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> =
         vec![ar(tr(state.lang, "books"), title_size(state.font_size))];
@@ -4957,6 +5277,26 @@ fn menu_entries(state: &State) -> Vec<MenuDef> {
                 ("bookmarks", Message::PanelSelected(Panel::Bookmarks)),
                 ("notes", Message::ToggleNotes),
                 ("toc_word", Message::ToggleToc),
+                (
+                    if state.show_books_pane {
+                        "pane_books_on"
+                    } else {
+                        "pane_books_off"
+                    },
+                    Message::TogglePane(PaneKind::Books),
+                ),
+                (
+                    if state.show_side_pane {
+                        "pane_side_on"
+                    } else {
+                        "pane_side_off"
+                    },
+                    Message::TogglePane(PaneKind::Side),
+                ),
+                ("side_mode_tabs", Message::SideModePick(SideMode::Tabs)),
+                ("side_mode_tree", Message::SideModePick(SideMode::Tree)),
+                ("side_mode_two", Message::SideModePick(SideMode::TwoTrees)),
+                ("layout_reset", Message::ResetLayout),
                 ("theme", Message::ThemeToggle),
                 ("settings", Message::ToggleSettings),
             ],
@@ -4979,6 +5319,15 @@ fn menu_entries(state: &State) -> Vec<MenuDef> {
             ],
         ),
     ]
+}
+
+/// Label of the current side pane layout.
+fn side_mode_label(lang: Lang, mode: SideMode) -> &'static str {
+    match mode {
+        SideMode::Tabs => tr(lang, "side_mode_tabs"),
+        SideMode::Tree => tr(lang, "side_mode_tree"),
+        SideMode::TwoTrees => tr(lang, "side_mode_two"),
+    }
 }
 
 /// Desktop-style menu bar with an expanding item strip (RTL aware).
@@ -5353,6 +5702,28 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
             state.search_opts.strip_tatweel,
             Message::ToggleOptTatweel
         ),
+        ar(tr(state.lang, "layout_section"), 16.0),
+        toggle_row(
+            tr(state.lang, "pane_books").to_string(),
+            state.show_books_pane,
+            Message::TogglePane(PaneKind::Books)
+        ),
+        toggle_row(
+            tr(state.lang, "pane_side").to_string(),
+            state.show_side_pane,
+            Message::TogglePane(PaneKind::Side)
+        ),
+        row![
+            ar(tr(state.lang, "side_mode"), 15.0),
+            Space::with_width(Length::Fill),
+            button(ar_boxed(side_mode_label(state.lang, state.side_mode), 14.0))
+                .on_press(Message::SideModeCycle),
+        ]
+        .spacing(6),
+        row![button(ar(tr(state.lang, "layout_reset"), 14.0))
+            .on_press(Message::ResetLayout)
+            .width(Length::Fill),]
+        .spacing(6),
         ar(tr(state.lang, "data_section"), 16.0),
         row![
             button(ar(tr(state.lang, "clear_cache"), 14.0))
@@ -5809,14 +6180,15 @@ fn view(state: &State) -> Element<'_, Message> {
         pane_grid::PaneGrid::new(&state.panes, |_pane, content, _| {
             pane_grid::Content::new(match content {
                 PaneKind::Reader => reader(state),
-                PaneKind::Books => books_panel(state),
+                PaneKind::Books => books_pane(state),
                 PaneKind::Side => {
-                    let body = if quran_active(state) {
-                        quran_panel(state)
+                    if quran_active(state) {
+                        column![quran_panel(state), panel_tabs(state)]
+                            .spacing(4)
+                            .into()
                     } else {
-                        sidebar(state)
-                    };
-                    column![body, panel_tabs(state)].spacing(4).into()
+                        side_pane(state)
+                    }
                 }
             })
         })
