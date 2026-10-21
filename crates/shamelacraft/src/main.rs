@@ -5324,15 +5324,6 @@ fn side_mode_short_label(lang: Lang, mode: SideMode) -> &'static str {
     }
 }
 
-/// Label of the current side pane layout.
-fn side_mode_label(lang: Lang, mode: SideMode) -> &'static str {
-    match mode {
-        SideMode::Tabs => tr(lang, "side_mode_tabs"),
-        SideMode::Tree => tr(lang, "side_mode_tree"),
-        SideMode::TwoTrees => tr(lang, "side_mode_two"),
-    }
-}
-
 /// Desktop-style menu bar with an expanding item strip (RTL aware).
 fn menu_bar(state: &State) -> Element<'_, Message> {
     let lang = state.lang;
