@@ -18,14 +18,17 @@ Lightweight, open-source Arabic library reader in pure Rust.
   Android `.mdb` (`book` + `title` tables) and `.mbok` (SQLite), with
   full-text reader tabs, page navigation, and TOC jumping
 - **Download manager**: a categorized keyless source catalog for archive.org
-  (Shamela PC/Android/MBOK libraries, 26 curated entries and 26,000+ books), a
-  pasted item URL, **deep pack browsing** (list and fetch one book from a
-  ZIP/RAR without downloading the whole collection), per-file / multi-select /
-  whole-item downloads, per-book download by title, open-book re-download,
-  name filter, size/kind badges, live progress, queue summary, cancel, retry
-  and remove. ZIP / TAR / TAR.GZ / RAR / **7z** are extracted locally. Split
-  RAR sets can be browsed, but archive.org only extracts inner books from the
-  first volume; later volumes return 503 for individual files.
+  (Shamela PC/Android/MBOK libraries, 26 curated entries and 20,700+ catalogued
+  books), a pasted item URL, **cross-source title search** (search any book and
+  find it in every curated source), **deep pack browsing** (list and fetch one
+  book from a ZIP/RAR without downloading the whole collection), per-file /
+  multi-select / whole-item downloads, per-book download by title, open-book
+  re-download, **real names for numbered `.mdb`/`.mbok` files** (from the open
+  master database and from each pack's own `main.mdb` index), name filter,
+  size/kind badges, live progress, queue summary, cancel, retry and remove.
+  ZIP / TAR / TAR.GZ / RAR / **7z** are extracted locally. Split RAR sets can
+  be browsed, but archive.org only extracts inner books from the first volume;
+  later volumes return 503 for individual files.
 - **One unified reading pane** for imported books and the Uthmani Quran
 - **Quran tab** with the sura index replacing the library tree, plus nine
   keyless Arabic tafsirs cached locally
@@ -120,13 +123,20 @@ Three keyless paths, all offline-friendly after the first fetch:
 1. **In-app downloads (easiest).** Press the globe (التحميل) button. The
    manager takes an archive.org item id or a pasted URL, offers ready sources
    (e.g. `mutunulhadith` — 172 single-book `.bok` files), and lists every
-   importable file with its size and kind. Search the list by name (فلترة),
-   tick several books (تحديد الكل / تحديد) and download just those — real
-   per-book downloads from `.bok` collections; or download the whole pack.
-   The open book can be fetched from the reader header (تحميل الكتاب): if it
-   was imported before it re-downloads its recorded source, otherwise the
-   best title match inside the listed source is queued. Everything converts
-   to the local `Page`/`Title` format and opens in a reader tab automatically.
+   importable file with its size and kind. Type a title and press **كل المصادر**
+   to search the whole embedded catalog (20,700+ books) at once, or **بحث
+   archive.org** for items. Search the current list by name (فلترة), tick
+   several books (تحديد الكل / تحديد) and download just those — real per-book
+   downloads from `.bok` collections; or download the whole pack. Numbered
+   `.mbok` files are named from the open master database; packs that ship their
+   own catalog (مكتبة ابن وهف / المكتبة السلفية الشاملة) get a **جلب الأسماء**
+   button that downloads only their small `main.mdb` index and shows every
+   book's real name before any book is downloaded. The open book can be
+   fetched from the reader header (تحميل الكتاب): if it was imported before it
+   re-downloads its recorded source (deep inner paths included), otherwise the
+   best title match is queued — first inside the listed source, then across
+   every curated source. Everything converts to the local `Page`/`Title`
+   format and opens in a reader tab automatically.
 2. **Local `.bok` files.** Use استيراد BOK to convert any legacy `.bok`
    (Jet3/MDB, Windows-1256) with the pure-Rust importer.
 3. **Official per-book databases** (needs a free API key from mail@shamela.ws)

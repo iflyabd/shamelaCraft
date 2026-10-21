@@ -110,11 +110,27 @@ pub fn search_items(query: &str, rows: usize) -> Result<Vec<ArchiveItem>> {
     parse_search_items(&fetch_text(&url)?)
 }
 
+/// Non-book files inside Shamela PC installs: the catalog in `Files/`
+/// (`main.mdb`, `user.mdb`, `special.mdb`) and the search-index databases in
+/// `Indices/`. They use the same extensions as books but are not readable.
+fn is_library_metadata(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase().replace('\\', "/");
+    let segments: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
+    if segments.iter().any(|part| *part == "indices") {
+        return true;
+    }
+    let file = segments.last().copied().unwrap_or("");
+    let in_files = segments.iter().any(|part| *part == "files");
+    in_files && matches!(file, "main.mdb" | "user.mdb" | "special.mdb")
+}
+
 /// Keep only `.bok` files (case-insensitive).
 pub fn bok_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
     files
         .iter()
-        .filter(|file| file.name.to_ascii_lowercase().ends_with(".bok"))
+        .filter(|file| {
+            file.name.to_ascii_lowercase().ends_with(".bok") && !is_library_metadata(&file.name)
+        })
         .collect()
 }
 
@@ -124,7 +140,8 @@ pub fn book_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
         .iter()
         .filter(|file| {
             let lower = file.name.to_ascii_lowercase();
-            lower.ends_with(".bok") || lower.ends_with(".mdb") || lower.ends_with(".mbok")
+            (lower.ends_with(".bok") || lower.ends_with(".mdb") || lower.ends_with(".mbok"))
+                && !is_library_metadata(&file.name)
         })
         .collect()
 }
@@ -134,7 +151,9 @@ pub fn book_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
 pub fn downloadable_files(files: &[ArchiveFile]) -> Vec<&ArchiveFile> {
     files
         .iter()
-        .filter(|file| crate::extract::is_importable(&file.name))
+        .filter(|file| {
+            crate::extract::is_importable(&file.name) && !is_library_metadata(&file.name)
+        })
         .collect()
 }
 
@@ -232,7 +251,7 @@ pub fn parse_archive_listing(document: &str, identifier: &str) -> Result<Vec<Arc
             continue;
         };
         let name = decode_entities(text[..text_end].trim());
-        if name.is_empty() || !crate::extract::is_importable(&name) {
+        if name.is_empty() || !crate::extract::is_importable(&name) || is_library_metadata(&name) {
             continue;
         }
         let size = row
@@ -314,6 +333,7 @@ pub fn download_to(url: &str, dest: &std::path::Path) -> Result<u64> {
         std::fs::create_dir_all(parent).map_err(|error| crate::err(format!("mkdir: {error}")))?;
     }
     let response = ureq::get(url)
+        .timeout(std::time::Duration::from_secs(300))
         .call()
         .map_err(|error| err(format!("GET {url}: {error}")))?;
     let mut reader = response.into_reader();
@@ -373,6 +393,18 @@ mod tests {
         assert_eq!(files[0].size, 116736);
         assert!(files[0].url.as_deref().unwrap().ends_with("nested/10.mdb"));
         assert_eq!(files[1].name, "nested/11.bok");
+    }
+
+    #[test]
+    fn skips_library_metadata() {
+        let html = r#"
+        <tr><td><a href="//archive.org/download/item/pack.rar/X/Files/main.mdb">X/Files/main.mdb</a><td><td>2020<td id="size">10</tr>
+        <tr><td><a href="//archive.org/download/item/pack.rar/X/Indices/1/2.mdb">X/Indices/1/2.mdb</a><td><td>2020<td id="size">10</tr>
+        <tr><td><a href="//archive.org/download/item/pack.rar/X/Books/1/2.mdb">X/Books/1/2.mdb</a><td><td>2020<td id="size">10</tr>
+        "#;
+        let files = parse_archive_listing(html, "item").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "X/Books/1/2.mdb");
     }
 
     #[test]

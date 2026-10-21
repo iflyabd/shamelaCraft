@@ -249,6 +249,9 @@ enum Message {
     DlSourcesToggle,
     DlQueryInput(String),
     DlSearch,
+    DlGlobalSearch,
+    DlDownloadIndexed(usize),
+    DlFetchNames,
     DlClearResults,
     DlOpenItem(String),
     AccentNext,
@@ -331,6 +334,12 @@ struct QueueItem {
     failed: Option<String>,
 }
 
+/// Background name-index result: pack key plus the id → title map.
+type NameFetch = (
+    String,
+    Result<std::collections::HashMap<i64, String>, String>,
+);
+
 struct State {
     lib: Option<Library>,
     index: Option<BookIndex>,
@@ -381,6 +390,14 @@ struct State {
     dl_filter: String,
     dl_query: String,
     dl_results: Vec<shamela_import::archive::ArchiveItem>,
+    /// Indices into `source_index()` for the cross-source title search.
+    dl_global: Option<Vec<usize>>,
+    /// Master database names by book id, used to label numbered files.
+    book_titles: std::collections::HashMap<i64, String>,
+    /// Names fetched from a pack's own `main.mdb`, keyed by source+container.
+    pack_names: std::collections::HashMap<String, std::collections::HashMap<i64, String>>,
+    /// Pending background name-index fetch.
+    name_rx: Option<std::sync::mpsc::Receiver<NameFetch>>,
     dl_queue: Vec<QueueItem>,
     dl_next_id: usize,
     show_downloads: bool,
@@ -459,6 +476,10 @@ impl Default for State {
             dl_filter: String::new(),
             dl_query: String::new(),
             dl_results: Vec::new(),
+            dl_global: None,
+            book_titles: std::collections::HashMap::new(),
+            pack_names: std::collections::HashMap::new(),
+            name_rx: None,
             font_size: 24.0,
             theme_kind: AppTheme::Light,
             status: String::from("افتح ملف master.db لبدء التصفح"),
@@ -907,8 +928,10 @@ fn open_database_path(state: &mut State, preset: Option<PathBuf>) {
                     remember_db(&path);
                     let author_names: std::collections::HashMap<i64, String> =
                         lib.author_names().unwrap_or_default().into_iter().collect();
+                    let book_titles = lib.book_names().unwrap_or_default();
                     state.lib = Some(lib);
                     state.author_names = author_names;
+                    state.book_titles = book_titles;
                     state.index = Some(index);
                     state.categories = state
                         .lib
@@ -1433,6 +1456,41 @@ fn write_sidecar(dest: &std::path::Path, url: &str) {
     }
 }
 
+/// Best origin URL for one book extracted from a downloaded pack: the exact
+/// inner file URL when the current listing or the embedded catalog knows it,
+/// else the pack URL.
+fn extracted_origin(state: &State, local: &std::path::Path, fallback: &str) -> String {
+    let leaf = local
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if leaf.is_empty() {
+        return fallback.to_string();
+    }
+    let item = state.dl_id.trim();
+    if !item.is_empty() {
+        if let Some(file) = state
+            .dl_files
+            .iter()
+            .find(|file| file.name.rsplit('/').next() == Some(leaf))
+        {
+            return shamela_import::archive::file_url(item, file);
+        }
+        let pack = safe_leaf(fallback);
+        if let Some(entry) = source_index().iter().find(|file| {
+            let source = &DL_PRESETS[usize::from(file.source)];
+            source.id == item && file.archive == pack && file.name.rsplit('/').next() == Some(leaf)
+        }) {
+            let source = &DL_PRESETS[usize::from(entry.source)];
+            return shamela_import::archive::download_url(
+                source.id,
+                &format!("{}/{}", entry.archive, entry.name),
+            );
+        }
+    }
+    fallback.to_string()
+}
+
 /// Import every converted book; open the first.
 fn import_bok_list(state: &mut State, boks: &[std::path::PathBuf], url: &str) {
     let mut opened = false;
@@ -1459,8 +1517,12 @@ fn import_bok_list(state: &mut State, boks: &[std::path::PathBuf], url: &str) {
             continue;
         }
         count += 1;
+        let origin = extracted_origin(state, bok, url);
+        if let Some(stem) = out.file_stem().and_then(|part| part.to_str()) {
+            let _ = std::fs::write(books_dir().join(format!("{stem}.db.url")), &origin);
+        }
         if !opened {
-            open_imported_db(state, &out, title, Some(url.to_string()));
+            open_imported_db(state, &out, title, Some(origin));
             opened = true;
         }
     }
@@ -1502,7 +1564,7 @@ fn enqueue_file(state: &mut State, name: String) {
         .as_ref()
         .map(|file| shamela_import::archive::file_url(&item, file))
         .unwrap_or_else(|| shamela_import::archive::download_url(&item, &name));
-    let leaf = name.rsplit('/').next().unwrap_or(&name).to_string();
+    let leaf = safe_leaf(&name);
     let file_name = if state.dl_archive.is_empty() {
         leaf.clone()
     } else {
@@ -1515,6 +1577,66 @@ fn enqueue_file(state: &mut State, name: String) {
     let after = after_kind(&leaf);
     enqueue(state, leaf.clone(), url, dest, after);
     state.status = format!("queued: {leaf}");
+}
+
+/// Queue one book of the embedded cross-source catalog.
+fn download_indexed(state: &mut State, index: usize) {
+    let Some(file) = source_index().get(index) else {
+        return;
+    };
+    let source = &DL_PRESETS[usize::from(file.source)];
+    let leaf = safe_leaf(&file.name);
+    let url = if file.archive.is_empty() {
+        shamela_import::archive::download_url(source.id, &file.name)
+    } else {
+        shamela_import::archive::download_url(source.id, &format!("{}/{}", file.archive, file.name))
+    };
+    let file_name = if file.archive.is_empty() {
+        leaf.clone()
+    } else {
+        format!(
+            "{}_{leaf}",
+            short_hash(&format!("{}/{}/{}", source.id, file.archive, file.name))
+        )
+    };
+    let dest = downloads_dir().join(&file_name);
+    let after = after_kind(&leaf);
+    enqueue(state, leaf.clone(), url, dest, after);
+    state.status = format!("queued: {leaf} ({})", source.label);
+}
+
+/// Search every curated source by book name, file name or source label.
+fn search_all_sources(state: &mut State) {
+    let key = match_key(&state.dl_query);
+    if key.chars().count() < 2 {
+        state.status = String::from(tr(state.lang, "search_all_hint"));
+        return;
+    }
+    let mut hits = Vec::new();
+    for (index, file) in source_index().iter().enumerate() {
+        let source = &DL_PRESETS[usize::from(file.source)];
+        let label = file_label(state, source.id, &file.archive, &file.name);
+        let source_hit = key.chars().count() >= 4
+            && source
+                .label
+                .split_whitespace()
+                .any(|word| match_key(word).contains(&key));
+        if match_key(&label).contains(&key) || match_key(&file.name).contains(&key) || source_hit {
+            hits.push(index);
+            if hits.len() >= MAX_GLOBAL_RESULTS {
+                break;
+            }
+        }
+    }
+    let count = hits.len();
+    state.dl_global = Some(hits);
+    state.dl_results.clear();
+    state.dl_sources = false;
+    state.status = format!(
+        "{}: {count} — \"{}\"",
+        tr(state.lang, "search_all_sources"),
+        state.dl_query.trim()
+    );
 }
 
 /// Stable short tag used to keep deep-pack file names unique.
@@ -1590,8 +1712,11 @@ fn match_key(content: &str) -> String {
         .collect()
 }
 
-/// "540 KB" / "12.3 MB" / "1.20 GB".
+/// "540 KB" / "12.3 MB" / "1.20 GB" / "—" when the listing has no size.
 fn fmt_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return String::from("—");
+    }
     let mib = bytes as f64 / 1_048_576.0;
     if mib >= 1024.0 {
         format!("{:.2} GB", mib / 1024.0)
@@ -1617,6 +1742,165 @@ fn display_name(name: &str) -> String {
     trim_text(name.rsplit('/').next().unwrap_or(name), 38)
 }
 
+/// Numeric stem of a listed book file (`10746.mbok`, `Books/4/34.mdb`).
+fn file_id(name: &str) -> Option<i64> {
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    let stem = leaf.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(leaf);
+    stem.trim().parse::<i64>().ok()
+}
+
+/// Last path segment of a name or URL, decoded and safe to use as a file
+/// name. Deep archive.org URLs can encode the inner folder in one segment
+/// (`shamela%2F10006.mbok`), which must never leak into a local path.
+fn safe_leaf(name: &str) -> String {
+    let decoded = percent_decode(name);
+    let leaf = decoded
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if leaf.is_empty() || leaf == "." || leaf == ".." {
+        String::from("book.bok")
+    } else {
+        leaf
+    }
+}
+
+/// Cache key of a pack's fetched name index.
+fn pack_key(source_id: &str, archive: &str) -> String {
+    format!("{source_id}\t{archive}")
+}
+
+/// Human label for one source book row: a name fetched from the pack's own
+/// catalog, the open master database when the source uses official book ids,
+/// or a plain `كتاب <n>` fallback when nothing can know it yet.
+fn file_label(state: &State, source_id: &str, archive: &str, name: &str) -> String {
+    if let Some(id) = file_id(name) {
+        if let Some(map) = state.pack_names.get(&pack_key(source_id, archive)) {
+            if let Some(title) = map.get(&id) {
+                return title.clone();
+            }
+        }
+        if OFFICIAL_ID_SOURCES.contains(&source_id) {
+            if let Some(title) = state.book_titles.get(&id) {
+                return title.clone();
+            }
+        }
+        return format!("{} {id}", tr(state.lang, "book_number"));
+    }
+    display_name(name)
+}
+
+fn names_dir() -> PathBuf {
+    let dir = data_dir().join("names");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn name_cache_path(entry: &NameIndexSource) -> PathBuf {
+    names_dir().join(format!(
+        "names-{}.tsv",
+        short_hash(&format!("{}/{}/{}", entry.id, entry.archive, entry.inner))
+    ))
+}
+
+fn load_name_cache(entry: &NameIndexSource) -> Option<std::collections::HashMap<i64, String>> {
+    let text = std::fs::read_to_string(name_cache_path(entry)).ok()?;
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let Some(id) = parts.next().and_then(|raw| raw.trim().parse::<i64>().ok()) else {
+            continue;
+        };
+        let title = parts.next().unwrap_or("").trim();
+        if !title.is_empty() {
+            map.insert(id, title.to_string());
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
+}
+
+/// Load (or download) a pack's own name catalog, in the background so large
+/// indexes never freeze the window.
+fn start_name_fetch(state: &mut State) {
+    if state.name_rx.is_some() {
+        state.status = format!("{}…", tr(state.lang, "names_loading"));
+        return;
+    }
+    let Some(entry) = name_index_source(&state.dl_id, &state.dl_archive) else {
+        state.status = String::from(tr(state.lang, "names_no_index"));
+        return;
+    };
+    let key = pack_key(entry.id, entry.archive);
+    if state.pack_names.contains_key(&key) {
+        state.status = String::from(tr(state.lang, "names_loaded"));
+        return;
+    }
+    if let Some(map) = load_name_cache(entry) {
+        let count = map.len();
+        state.pack_names.insert(key, map);
+        state.status = format!("{}: {count}", tr(state.lang, "names_loaded"));
+        return;
+    }
+    let url = shamela_import::archive::download_url(
+        entry.id,
+        &format!("{}/{}", entry.archive, entry.inner),
+    );
+    let cache = name_cache_path(entry);
+    let download = cache.with_extension("mdb");
+    let (tx, rx) = std::sync::mpsc::channel();
+    state.name_rx = Some(rx);
+    state.status = format!("{}…", tr(state.lang, "names_loading"));
+    std::thread::spawn(move || {
+        let result = shamela_import::archive::download_to(&url, &download)
+            .map_err(|error| error.to_string())
+            .and_then(|_| {
+                let index = shamela_import::bok::name_index(&download)
+                    .map_err(|error| error.to_string())?;
+                let mut text = String::new();
+                for (id, title) in &index {
+                    text.push_str(&format!("{id}\t{title}\n"));
+                }
+                let _ = std::fs::write(&cache, text);
+                let _ = std::fs::remove_file(&download);
+                Ok(index)
+            });
+        let _ = tx.send((key, result));
+    });
+}
+
+/// Pick up a finished name-index fetch (called from the periodic tick).
+fn poll_name_fetch(state: &mut State) {
+    let received = state.name_rx.as_ref().map(|rx| rx.try_recv());
+    let Some(received) = received else {
+        return;
+    };
+    match received {
+        Ok((key, result)) => {
+            state.name_rx = None;
+            match result {
+                Ok(map) => {
+                    let count = map.len();
+                    state.pack_names.insert(key, map);
+                    state.status = format!("{}: {count}", tr(state.lang, "names_loaded"));
+                }
+                Err(error) => {
+                    state.status = format!("names failed: {error}");
+                }
+            }
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            state.name_rx = None;
+        }
+    }
+}
+
 /// archive.org can list and stream entries from ZIP/RAR containers, but its
 /// 7z view often fails; 7z files are downloaded whole and unpacked locally.
 fn can_browse(name: &str) -> bool {
@@ -1637,12 +1921,23 @@ fn file_kind(name: &str, lang: Lang) -> &'static str {
 }
 
 /// Source files filtered by the name filter (list order preserved).
+/// Numbered files match on their resolved title as well as their file name.
 fn visible_files(state: &State) -> Vec<shamela_import::archive::ArchiveFile> {
     let needle = match_key(&state.dl_filter);
     state
         .dl_files
         .iter()
-        .filter(|file| needle.is_empty() || match_key(&file.name).contains(&needle))
+        .filter(|file| {
+            needle.is_empty()
+                || match_key(&file.name).contains(&needle)
+                || match_key(&file_label(
+                    state,
+                    &state.dl_id,
+                    &state.dl_archive,
+                    &file.name,
+                ))
+                .contains(&needle)
+        })
         .cloned()
         .collect()
 }
@@ -1680,6 +1975,26 @@ fn download_selected(state: &mut State) {
     };
 }
 
+/// Local file name for re-downloading a recorded URL: direct item files keep
+/// their leaf name, deep inner files get a stable hash prefix so two packs
+/// never collide on the same book id.
+fn recorded_name(url: &str) -> String {
+    let leaf = safe_leaf(url);
+    let decoded = percent_decode(url);
+    let rest = decoded.split("/download/").nth(1).unwrap_or("");
+    let segments = rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .split('/')
+        .count();
+    if segments > 2 {
+        format!("{}_{leaf}", short_hash(url))
+    } else {
+        leaf
+    }
+}
+
 /// Download the book that is open right now: the recorded source URL of an
 /// imported book when known, otherwise the best name match inside the listed
 /// source item (real per-book download from a `.bok` collection).
@@ -1700,6 +2015,7 @@ fn download_tab(state: &mut State, index: usize) {
     let title = tab.title.clone();
     let db = tab.db.clone();
 
+    let mut pack_sidecar: Option<(String, String)> = None;
     if let Some(db) = db {
         let stem = db
             .file_stem()
@@ -1709,15 +2025,18 @@ fn download_tab(state: &mut State, index: usize) {
         if let Ok(url) = std::fs::read_to_string(books_dir().join(format!("{stem}.db.url"))) {
             let url = url.trim().to_string();
             if !url.is_empty() {
-                let mut file_name = percent_decode(url.rsplit('/').next().unwrap_or(""));
-                if file_name.is_empty() {
-                    file_name = format!("{stem}.bok");
+                let file_name = recorded_name(&url);
+                if after_kind(&file_name) == AfterDl::ImportArchive {
+                    // Old imports recorded the whole pack; keep it as the
+                    // last resort and try a single-book match first.
+                    pack_sidecar = Some((file_name, url));
+                } else {
+                    let dest = downloads_dir().join(&file_name);
+                    let after = after_kind(&file_name);
+                    enqueue(state, file_name.clone(), url, dest, after);
+                    state.status = format!("re-downloading: {file_name}");
+                    return;
                 }
-                let dest = downloads_dir().join(&file_name);
-                let after = after_kind(&file_name);
-                enqueue(state, file_name.clone(), url, dest, after);
-                state.status = format!("re-downloading: {file_name}");
-                return;
             }
         }
     }
@@ -1742,6 +2061,32 @@ fn download_tab(state: &mut State, index: usize) {
             state.status = format!("queued book: {}", display_name(&file.name));
             return;
         }
+
+        // Nothing in the listed source: search every curated source by the
+        // resolved title before giving up.
+        let mut global = source_index().iter().position(|file| {
+            let source = &DL_PRESETS[usize::from(file.source)];
+            match_key(&file_label(state, source.id, &file.archive, &file.name)) == key
+        });
+        if global.is_none() {
+            global = source_index().iter().position(|file| {
+                let source = &DL_PRESETS[usize::from(file.source)];
+                let label = match_key(&file_label(state, source.id, &file.archive, &file.name));
+                !label.is_empty() && (label.contains(&key) || key.contains(&label))
+            });
+        }
+        if let Some(index) = global {
+            download_indexed(state, index);
+            return;
+        }
+    }
+
+    if let Some((file_name, url)) = pack_sidecar {
+        let dest = downloads_dir().join(&file_name);
+        let after = after_kind(&file_name);
+        enqueue(state, file_name.clone(), url, dest, after);
+        state.status = format!("re-downloading pack: {file_name}");
+        return;
     }
 
     state.status = String::from(tr(state.lang, "no_source_match"));
@@ -2464,9 +2809,11 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.dl_archive.clear();
             state.dl_files.clear();
             state.dl_selected.clear();
+            state.dl_global = None;
         }
         Message::DownloadList => {
             state.dl_results.clear();
+            state.dl_global = None;
             state.dl_archive.clear();
             state.dl_sources = false;
             refresh_download_list(state);
@@ -2508,7 +2855,10 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
                 ensure_source_files(state);
             }
         }
-        Message::DlTick => poll_downloads(state),
+        Message::DlTick => {
+            poll_name_fetch(state);
+            poll_downloads(state);
+        }
         Message::DlRemove(id) => remove_job(state, id),
         Message::DlRetry(id) => retry_job(state, id),
         Message::DlCancel => cancel_all(state),
@@ -2551,6 +2901,7 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.dl_id = String::from(source.id);
             state.dl_archive = source.archive.unwrap_or("").to_string();
             state.dl_results.clear();
+            state.dl_global = None;
             state.dl_filter.clear();
             state.dl_sources = false;
             refresh_download_list(state);
@@ -2558,6 +2909,7 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DlBrowseArchive(archive) => {
             state.dl_archive = archive;
             state.dl_results.clear();
+            state.dl_global = None;
             state.dl_filter.clear();
             state.dl_sources = false;
             refresh_download_list(state);
@@ -2573,11 +2925,13 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
             state.dl_sources = !state.dl_sources;
             if state.dl_sources {
                 state.dl_results.clear();
+                state.dl_global = None;
             }
         }
         Message::DlQueryInput(text) => state.dl_query = text,
         Message::DlSearch => {
             let query = state.dl_query.trim().to_string();
+            state.dl_global = None;
             if query.is_empty() {
                 state.status = String::from("type a book title to search archive.org");
             } else {
@@ -2596,12 +2950,19 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::DlClearResults => state.dl_results.clear(),
+        Message::DlGlobalSearch => search_all_sources(state),
+        Message::DlDownloadIndexed(index) => download_indexed(state, index),
+        Message::DlFetchNames => start_name_fetch(state),
+        Message::DlClearResults => {
+            state.dl_results.clear();
+            state.dl_global = None;
+        }
         Message::DlOpenItem(id) => {
             state.dl_id = id;
             state.dl_archive.clear();
             state.dl_sources = false;
             state.dl_results.clear();
+            state.dl_global = None;
             state.dl_filter.clear();
             refresh_download_list(state);
         }
@@ -3306,7 +3667,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "kotobe-mojahed-din-maktab-shamele",
         label: "مكتبة المجاهد",
         archive: None,
-        count: "—",
+        count: "١٦",
         format: "BOK",
         note: "RAR ١.٨MB",
         group: "كتب BOK مباشرة",
@@ -3324,7 +3685,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "bin-wahaf-shamela",
         label: "مكتبة ابن وهف",
         archive: Some("BinWahaf-Shamela.zip"),
-        count: "٢٦٩",
+        count: "١٣٣",
         format: "MDB",
         note: "ZIP ٧٦MB",
         group: "مكتبات MDB للجوال",
@@ -3333,7 +3694,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "ABDOFAIZE2010_GMAIL_201702",
         label: "المكتبة السلفية الشاملة",
         archive: Some("المكتبة السلفية الشاملة.rar"),
-        count: "٤٧٥٣",
+        count: "٤٧٠٠",
         format: "MDB",
         note: "RAR ١.٦GB",
         group: "مكتبات MDB للجوال",
@@ -3378,7 +3739,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "shamela-hesham",
         label: "شاملة هشام ٥/٧",
         archive: Some("shamela-hesham.part05.rar"),
-        count: "٣١٠٣",
+        count: "١٣٣٩",
         format: "MDB",
         note: "RAR ٩٥٤MB",
         group: "مكتبات MDB للجوال",
@@ -3387,7 +3748,7 @@ const DL_PRESETS: &[DlSource] = &[
         id: "shamela-hesham",
         label: "شاملة هشام ٦/٧",
         archive: Some("shamela-hesham.part06.rar"),
-        count: "٣٤٣١",
+        count: "—",
         format: "MDB",
         note: "RAR ٩٥٤MB",
         group: "مكتبات MDB للجوال",
@@ -3498,6 +3859,86 @@ const DL_PRESETS: &[DlSource] = &[
 const MAX_QUEUE_BATCH: usize = 500;
 const MAX_RENDER_FILES: usize = 400;
 
+/// Cross-source title search: cap on returned/rendered hits.
+const MAX_GLOBAL_RESULTS: usize = 300;
+
+/// Every book across every curated source, generated from public archive.org
+/// listings (metadata only — no book content). One TSV row per file:
+/// source index, container (empty = direct item file), file name, size.
+const SOURCE_INDEX_TSV: &str = include_str!("../assets/source_index.tsv");
+
+/// One book entry of the cross-source catalog.
+#[derive(Debug, Clone)]
+struct IndexedFile {
+    source: u16,
+    archive: String,
+    name: String,
+    size: u64,
+}
+
+/// Parse the embedded cross-source catalog once.
+fn source_index() -> &'static [IndexedFile] {
+    static INDEX: std::sync::OnceLock<Vec<IndexedFile>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        SOURCE_INDEX_TSV
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(4, '\t');
+                let source = parts.next()?.parse::<u16>().ok()?;
+                let archive = parts.next()?.to_string();
+                let name = parts.next()?.to_string();
+                let size = parts.next()?.trim().parse::<u64>().unwrap_or(0);
+                if name.is_empty() || usize::from(source) >= DL_PRESETS.len() {
+                    return None;
+                }
+                Some(IndexedFile {
+                    source,
+                    archive,
+                    name,
+                    size,
+                })
+            })
+            .collect()
+    })
+}
+
+/// A pack that ships its own Shamela catalog (`main.mdb`): fetching that one
+/// small file gives every numbered book its real name before any book is
+/// downloaded. `inner` is the exact archive.org listing name.
+struct NameIndexSource {
+    id: &'static str,
+    archive: &'static str,
+    inner: &'static str,
+    size: &'static str,
+}
+
+const NAME_INDEXES: &[NameIndexSource] = &[
+    NameIndexSource {
+        id: "bin-wahaf-shamela",
+        archive: "BinWahaf-Shamela.zip",
+        inner: "BinWahaf-Shamela/Files/main.mdb",
+        size: "٣٢٦KB",
+    },
+    NameIndexSource {
+        id: "ABDOFAIZE2010_GMAIL_201702",
+        archive: "المكتبة السلفية الشاملة.rar",
+        inner: "الشاملة (F)/Files/main.mdb",
+        size: "١٤MB",
+    },
+];
+
+fn name_index_source(id: &str, archive: &str) -> Option<&'static NameIndexSource> {
+    NAME_INDEXES
+        .iter()
+        .find(|entry| entry.id == id && entry.archive == archive)
+}
+
+/// Numbered `.mbok` rips of the official Shamela app: file names are the
+/// master database book ids, so the opened database can name them exactly.
+/// Other packs number files differently and must not borrow those names.
+const OFFICIAL_ID_SOURCES: &[&str] =
+    &["Shamela_android", "walid_201501", "z_427", "shamela.ws.005"];
+
 /// One curated source row in the catalog. The whole row is the open
 /// control, so long titles can never squeeze a separate button out of
 /// shape; the tooltip repeats the full, untrimmed label.
@@ -3581,7 +4022,18 @@ fn file_row(
     cells.push(ar_boxed(fmt_size(file.size), 12.0));
     cells.push(ar_boxed(file_kind(&file.name, state.lang), 12.0));
     cells.push(Space::with_width(Length::Fill).into());
-    cells.push(ar_boxed(display_name(&file.name), 13.0));
+    let label = file_label(state, &state.dl_id, &state.dl_archive, &file.name);
+    let full = format!("{label} — {}", file.name);
+    cells.push(
+        Tooltip::new(
+            ar_boxed(trim_text(&label, 38), 13.0),
+            ar_boxed(trim_text(&full, 96), 11.0),
+            Position::Left,
+        )
+        .gap(4)
+        .style(tooltip_style)
+        .into(),
+    );
     row(cells).spacing(6).width(Length::Fill).into()
 }
 
@@ -3591,7 +4043,11 @@ fn file_row_panel(
     file: &shamela_import::archive::ArchiveFile,
 ) -> Element<'static, Message> {
     let selected = state.dl_selected.contains(&file.name);
-    let label = format!("{} ({})", display_name(&file.name), fmt_size(file.size));
+    let label = format!(
+        "{} ({})",
+        file_label(state, &state.dl_id, &state.dl_archive, &file.name),
+        fmt_size(file.size)
+    );
     let mut cells: Vec<Element<'static, Message>> = vec![
         button(ar_boxed(if selected { "[x]" } else { "[ ]" }, 12.0))
             .on_press(Message::DlToggleFile(file.name.clone()))
@@ -5006,13 +5462,15 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     ]
     .spacing(6);
 
-    let archive_search = text_input(tr(lang, "archive_search_hint"), state.dl_query.as_str())
+    let archive_search = text_input(tr(lang, "search_all_hint"), state.dl_query.as_str())
         .font(AMIRI)
         .on_input(Message::DlQueryInput)
-        .on_submit(Message::DlSearch)
-        .padding(7);
+        .on_submit(Message::DlGlobalSearch)
+        .padding(7)
+        .width(Length::Fill);
     let search_row = row![
         archive_search,
+        button(ar_boxed(tr(lang, "search_all_sources"), 13.0)).on_press(Message::DlGlobalSearch),
         button(ar_boxed(tr(lang, "search_archive"), 13.0)).on_press(Message::DlSearch),
     ]
     .spacing(6);
@@ -5028,6 +5486,11 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         .map(|file| file.size)
         .sum();
     let sel_count = state.dl_selected.len();
+    let numeric_files = state
+        .dl_files
+        .iter()
+        .filter(|file| file_id(&file.name).is_some())
+        .count();
 
     let controls = row![
         button(ar_boxed(tr(lang, "download_all"), 14.0)).on_press(Message::DownloadAll),
@@ -5123,117 +5586,187 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     }
     let list = scrollable(column(rows).spacing(10)).height(Length::Fixed(145.0));
 
-    let (files_header, file_list): (Element<'_, Message>, Element<'_, Message>) =
-        if state.dl_sources {
-            let header = row![
-                button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlSourcesToggle),
-                Space::with_width(Length::Fill),
-                ar_boxed(
-                    format!("{} — {}", tr(lang, "sources"), DL_PRESETS.len()),
-                    13.0
-                ),
-            ]
-            .spacing(6);
-            (header.into(), source_list(state))
-        } else if state.dl_results.is_empty() {
-            let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
-                .font(AMIRI)
-                .on_input(Message::DlFilterInput)
-                .padding(6)
-                .width(Length::Fixed(200.0));
-            let header: Element<'_, Message> = if state.dl_archive.is_empty() {
+    let (files_header, file_list): (Element<'_, Message>, Element<'_, Message>) = if state
+        .dl_sources
+    {
+        let header = row![
+            button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlSourcesToggle),
+            Space::with_width(Length::Fill),
+            ar_boxed(
+                format!("{} — {}", tr(lang, "sources"), DL_PRESETS.len()),
+                13.0
+            ),
+        ]
+        .spacing(6);
+        (header.into(), source_list(state))
+    } else if let Some(hits) = state.dl_global.as_ref() {
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        for index in hits.iter().take(MAX_RENDER_FILES) {
+            let Some(file) = source_index().get(*index) else {
+                continue;
+            };
+            let source = &DL_PRESETS[usize::from(file.source)];
+            let label = file_label(state, source.id, &file.archive, &file.name);
+            let full = format!("{label} — {}", file.name);
+            rows.push(
                 row![
-                    filter,
-                    button(ar_boxed(tr(lang, "sources"), 11.0)).on_press(Message::DlSourcesToggle),
+                    button(ar_boxed(tr(lang, "download"), 12.0))
+                        .on_press(Message::DlDownloadIndexed(*index)),
+                    ar_boxed(fmt_size(file.size), 12.0),
+                    ar_boxed(trim_text(source.label, 22), 11.0),
                     Space::with_width(Length::Fill),
-                    ar_boxed(
-                        format!(
-                            "{} — {} {}/{}",
-                            tr(lang, "files_of"),
-                            tr(lang, "shown_of"),
-                            shown,
-                            total
-                        ),
-                        13.0,
-                    ),
+                    Tooltip::new(
+                        ar_boxed(trim_text(&label, 46), 13.0),
+                        ar_boxed(trim_text(&full, 96), 11.0),
+                        Position::Left,
+                    )
+                    .gap(4)
+                    .style(tooltip_style)
+                    .into(),
                 ]
                 .spacing(6)
-                .into()
-            } else {
-                column![
-                    row![
-                        button(ar_boxed(tr(lang, "back_to_pack"), 11.0))
-                            .on_press(Message::DlBackArchive),
-                        filter,
-                        Space::with_width(Length::Fill),
-                        ar_boxed(
-                            format!(
-                                "{}: {} — {}/{}",
-                                tr(lang, "inside_pack"),
-                                trim_text(&state.dl_archive, 24),
-                                shown,
-                                total
-                            ),
-                            12.0,
-                        ),
-                    ]
-                    .spacing(6),
-                    ar_boxed(tr(lang, "pack_hint"), 10.0),
-                ]
-                .spacing(2)
-                .into()
-            };
-            let mut files: Vec<Element<'_, Message>> = Vec::new();
-            for file in visible.iter().take(MAX_RENDER_FILES) {
-                files.push(file_row(state, file));
-            }
-            if files.is_empty() {
-                files.push(ar_boxed(tr(lang, "no_files"), 14.0));
-            }
-            if visible.len() > MAX_RENDER_FILES {
-                files.push(ar_boxed(
-                    format!(
-                        "{} {MAX_RENDER_FILES} / {}",
-                        tr(lang, "shown_of"),
-                        visible.len()
-                    ),
-                    11.0,
-                ));
-            }
-            let items = scrollable(column(files).spacing(4)).height(Length::Fixed(145.0));
-            (header, items.into())
-        } else {
-            let mut rows: Vec<Element<'_, Message>> = Vec::new();
-            for item in &state.dl_results {
-                rows.push(
-                    row![
-                        button(ar_boxed(tr(lang, "open"), 12.0))
-                            .on_press(Message::DlOpenItem(item.identifier.clone())),
-                        ar_boxed(trim_text(&item.identifier, 22), 11.0),
-                        Space::with_width(Length::Fill),
-                        ar_boxed(trim_text(&item.title, 58), 13.0),
-                    ]
-                    .spacing(6)
-                    .width(Length::Fill)
-                    .into(),
-                );
-            }
-            let header = row![
-                button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
+                .width(Length::Fill)
+                .into(),
+            );
+        }
+        if rows.is_empty() {
+            rows.push(ar_boxed(tr(lang, "no_results"), 13.0));
+        }
+        let header = row![
+            button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
+            Space::with_width(Length::Fill),
+            ar_boxed(
+                format!("{} — {}", tr(lang, "search_all_sources"), hits.len()),
+                13.0,
+            ),
+        ]
+        .spacing(6);
+        let items = scrollable(column(rows).spacing(4)).height(Length::Fixed(145.0));
+        (header.into(), items.into())
+    } else if state.dl_results.is_empty() {
+        let filter = text_input(tr(lang, "filter_files"), state.dl_filter.as_str())
+            .font(AMIRI)
+            .on_input(Message::DlFilterInput)
+            .padding(6)
+            .width(Length::Fixed(200.0));
+        let header: Element<'_, Message> = if state.dl_archive.is_empty() {
+            row![
+                filter,
+                button(ar_boxed(tr(lang, "sources"), 11.0)).on_press(Message::DlSourcesToggle),
                 Space::with_width(Length::Fill),
                 ar_boxed(
                     format!(
-                        "{} — {}",
-                        tr(lang, "search_results"),
-                        state.dl_results.len()
+                        "{} — {} {}/{}",
+                        tr(lang, "files_of"),
+                        tr(lang, "shown_of"),
+                        shown,
+                        total
                     ),
                     13.0,
                 ),
             ]
-            .spacing(6);
-            let items = scrollable(column(rows).spacing(4)).height(Length::Fixed(145.0));
-            (header.into(), items.into())
+            .spacing(6)
+            .into()
+        } else {
+            let names_key = pack_key(&state.dl_id, &state.dl_archive);
+            let names_count = state.pack_names.get(&names_key).map(|map| map.len());
+            let index_info = name_index_source(&state.dl_id, &state.dl_archive);
+            let names_row: Element<'_, Message> = if let Some(count) = names_count {
+                ar_boxed(format!("{}: {count}", tr(lang, "names_loaded")), 10.0)
+            } else if state.name_rx.is_some() {
+                ar_boxed(format!("{}…", tr(lang, "names_loading")), 10.0)
+            } else if let Some(info) = index_info {
+                Tooltip::new(
+                    button(ar_boxed(tr(lang, "fetch_names"), 10.0)).on_press(Message::DlFetchNames),
+                    ar_boxed(
+                        format!("{} ({})", tr(lang, "fetch_names_hint"), info.size),
+                        11.0,
+                    ),
+                    Position::Left,
+                )
+                .gap(4)
+                .style(tooltip_style)
+                .into()
+            } else if numeric_files > 0 {
+                ar_boxed(tr(lang, "names_unknown_hint"), 10.0)
+            } else {
+                Space::with_height(Length::Fixed(0.0)).into()
+            };
+            column![
+                row![
+                    button(ar_boxed(tr(lang, "back_to_pack"), 11.0))
+                        .on_press(Message::DlBackArchive),
+                    filter,
+                    Space::with_width(Length::Fill),
+                    ar_boxed(
+                        format!(
+                            "{}: {} — {}/{}",
+                            tr(lang, "inside_pack"),
+                            trim_text(&state.dl_archive, 24),
+                            shown,
+                            total
+                        ),
+                        12.0,
+                    ),
+                ]
+                .spacing(6),
+                names_row,
+                ar_boxed(tr(lang, "pack_hint"), 10.0),
+            ]
+            .spacing(2)
+            .into()
         };
+        let mut files: Vec<Element<'_, Message>> = Vec::new();
+        for file in visible.iter().take(MAX_RENDER_FILES) {
+            files.push(file_row(state, file));
+        }
+        if files.is_empty() {
+            files.push(ar_boxed(tr(lang, "no_files"), 14.0));
+        }
+        if visible.len() > MAX_RENDER_FILES {
+            files.push(ar_boxed(
+                format!(
+                    "{} {MAX_RENDER_FILES} / {}",
+                    tr(lang, "shown_of"),
+                    visible.len()
+                ),
+                11.0,
+            ));
+        }
+        let items = scrollable(column(files).spacing(4)).height(Length::Fixed(145.0));
+        (header, items.into())
+    } else {
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        for item in &state.dl_results {
+            rows.push(
+                row![
+                    button(ar_boxed(tr(lang, "open"), 12.0))
+                        .on_press(Message::DlOpenItem(item.identifier.clone())),
+                    ar_boxed(trim_text(&item.identifier, 22), 11.0),
+                    Space::with_width(Length::Fill),
+                    ar_boxed(trim_text(&item.title, 58), 13.0),
+                ]
+                .spacing(6)
+                .width(Length::Fill)
+                .into(),
+            );
+        }
+        let header = row![
+            button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
+            Space::with_width(Length::Fill),
+            ar_boxed(
+                format!(
+                    "{} — {}",
+                    tr(lang, "search_results"),
+                    state.dl_results.len()
+                ),
+                13.0,
+            ),
+        ]
+        .spacing(6);
+        let items = scrollable(column(rows).spacing(4)).height(Length::Fixed(145.0));
+        (header.into(), items.into())
+    };
 
     let body = column![
         title,
@@ -5297,7 +5830,7 @@ fn hotkey(key: keyboard::Key, mods: keyboard::Modifiers) -> Option<Message> {
 /// Keyboard shortcuts + a 400 ms download poll while jobs are active.
 fn subscribe(state: &State) -> iced::Subscription<Message> {
     let keys = keyboard::on_key_press(hotkey);
-    let tick = if dl_active(state) {
+    let tick = if dl_active(state) || state.name_rx.is_some() {
         iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::DlTick)
     } else {
         iced::Subscription::none()
@@ -5361,10 +5894,76 @@ fn main() -> iced::Result {
     if args.len() >= 4 && args[1] == "--self-test" {
         std::process::exit(self_test(&args[2], &args[3]));
     }
+    if args.len() >= 3 && args[1] == "--index-names" {
+        match shamela_import::bok::name_index(std::path::Path::new(&args[2])) {
+            Ok(map) => {
+                println!("NAMES OK count={}", map.len());
+                let mut ids: Vec<i64> = map.keys().copied().collect();
+                ids.sort_unstable();
+                for id in ids.iter().take(5) {
+                    println!("{id}\t{}", map.get(id).map(String::as_str).unwrap_or(""));
+                }
+                return iced::Result::Ok(());
+            }
+            Err(error) => {
+                eprintln!("NAMES FAIL: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     iced::application("ShamelaCraft", update, view)
         .window_size((1400.0, 900.0))
         .subscription(subscribe)
         .theme(theme)
         .font(include_bytes!("../assets/fonts/Amiri-Regular.ttf"))
         .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_leaf_handles_encoded_inner_paths() {
+        assert_eq!(
+            safe_leaf("https://archive.org/download/x/shamela.part01.rar/shamela%2F10006.mbok"),
+            "10006.mbok"
+        );
+        assert_eq!(
+            safe_leaf("https://archive.org/download/x/a%2Fb%2Fc.mdb"),
+            "c.mdb"
+        );
+        assert_eq!(safe_leaf(".../%2E%2E"), "book.bok");
+        assert_eq!(safe_leaf(""), "book.bok");
+    }
+
+    #[test]
+    fn recorded_names_stay_flat() {
+        let deep =
+            "https://archive.org/download/Shamela_android/shamela.part01.rar/shamela%2F10006.mbok";
+        let name = recorded_name(deep);
+        assert!(name.ends_with("_10006.mbok"), "{name}");
+        assert!(!name.contains('/'));
+
+        let direct = "https://archive.org/download/item/%D9%83%D8%AA%D8%A7%D8%A8.bok";
+        assert_eq!(recorded_name(direct), "كتاب.bok");
+    }
+
+    #[test]
+    fn file_id_reads_numeric_stems() {
+        assert_eq!(file_id("shamela/10006.mbok"), Some(10006));
+        assert_eq!(file_id("Books/4/34.mdb"), Some(34));
+        assert_eq!(file_id("book.mdb"), None);
+        assert_eq!(file_id(""), None);
+    }
+
+    #[test]
+    fn embedded_source_index_parses() {
+        let index = source_index();
+        assert!(index.len() > 20_000);
+        assert!(index
+            .iter()
+            .all(|file| usize::from(file.source) < DL_PRESETS.len()));
+        assert!(index.iter().all(|file| !file.name.is_empty()));
+    }
 }

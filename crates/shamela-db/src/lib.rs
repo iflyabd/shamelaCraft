@@ -184,6 +184,21 @@ impl Library {
         rows.collect()
     }
 
+    /// Every book id with its display name. Used to label numeric files
+    /// (`.mdb`/`.mbok` libraries name books by id) before download.
+    pub fn book_names(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let mut stmt = self.conn.prepare("SELECT book_id, book_name FROM book")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, name) = row?;
+            out.insert(id, name);
+        }
+        Ok(out)
+    }
+
     /// All books of one author (main or co-author), in catalog order.
     pub fn books_of_author(&self, author_id: i64) -> Result<Vec<Book>> {
         let sql = format!(

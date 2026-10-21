@@ -231,6 +231,39 @@ pub fn tr(lang: Lang, key: &str) -> &'static str {
         (Lang::Ar, "search_archive") => "بحث archive.org",
         (Lang::En, "search_archive") => "Search archive.org",
         (Lang::Fr, "search_archive") => "Chercher archive.org",
+        (Lang::Ar, "search_all_hint") => "ابحث عن كتاب في كل المصادر…",
+        (Lang::En, "search_all_hint") => "Search every source for a book…",
+        (Lang::Fr, "search_all_hint") => "Chercher un livre dans toutes les sources…",
+        (Lang::Ar, "search_all_sources") => "كل المصادر",
+        (Lang::En, "search_all_sources") => "All sources",
+        (Lang::Fr, "search_all_sources") => "Toutes les sources",
+        (Lang::Ar, "fetch_names") => "جلب الأسماء",
+        (Lang::En, "fetch_names") => "Fetch names",
+        (Lang::Fr, "fetch_names") => "Charger les noms",
+        (Lang::Ar, "fetch_names_hint") => "ينزّل فهرس المكتبة الصغير فقط ليعرض أسماء الكتب",
+        (Lang::En, "fetch_names_hint") => {
+            "Downloads only the small library index to show book names"
+        }
+        (Lang::Fr, "fetch_names_hint") => {
+            "Télécharge seulement l'index de la bibliothèque pour afficher les noms"
+        }
+        (Lang::Ar, "names_loaded") => "الأسماء",
+        (Lang::En, "names_loaded") => "Names",
+        (Lang::Fr, "names_loaded") => "Noms",
+        (Lang::Ar, "names_loading") => "جاري جلب الأسماء",
+        (Lang::En, "names_loading") => "Fetching names",
+        (Lang::Fr, "names_loading") => "Chargement des noms",
+        (Lang::Ar, "names_no_index") => "لا يوجد فهرس أسماء لهذا المصدر",
+        (Lang::En, "names_no_index") => "no name index for this source",
+        (Lang::Fr, "names_no_index") => "aucun index de noms pour cette source",
+        (Lang::Ar, "names_unknown_hint") => "أرقام فقط — تُعرف الأسماء بعد التنزيل",
+        (Lang::En, "names_unknown_hint") => "numbers only — names appear after download",
+        (Lang::Fr, "names_unknown_hint") => {
+            "numéros seulement — les noms apparaissent après téléchargement"
+        }
+        (Lang::Ar, "book_number") => "كتاب",
+        (Lang::En, "book_number") => "Book",
+        (Lang::Fr, "book_number") => "Livre",
         (Lang::Ar, "search_results") => "نتائج archive.org",
         (Lang::En, "search_results") => "archive.org results",
         (Lang::Fr, "search_results") => "Résultats archive.org",

@@ -620,6 +620,84 @@ fn positive_sql_text(value: String) -> Option<String> {
     }
 }
 
+/// Find the first table column matching one of `candidates` (lowercase).
+fn pick_column(table: &Table, candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|name| table.columns.contains_key(&name.to_ascii_lowercase()))
+        .map(|name| (*name).to_string())
+}
+
+/// Read a Shamela library catalog (`main.mdb`, or a converted SQLite
+/// `master.db`) into a `book id -> title` map.
+///
+/// PC Shamela keeps one table per category (`0bok`, `1bok`, …) with columns
+/// `bkid`/`bk`; converted catalogs use `book(book_id, book_name)`. The
+/// catalog is tiny next to the books, so a pack that ships one can show real
+/// names for numbered files before downloading any book.
+pub fn name_index(path: &Path) -> Result<HashMap<i64, String>> {
+    if is_sqlite(path) {
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| err(format!("open index: {error}")))?;
+        let mut out = HashMap::new();
+        if sqlite_table_exists(&conn, "book") {
+            let mut statement = conn
+                .prepare("SELECT CAST(book_id AS INTEGER), CAST(book_name AS TEXT) FROM book")
+                .map_err(|error| err(format!("book query: {error}")))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                })
+                .map_err(|error| err(format!("book rows: {error}")))?;
+            for row in rows {
+                let (id, title) = row.map_err(|error| err(format!("book row: {error}")))?;
+                if let (Some(id), Some(title)) = (id, title) {
+                    let title = clean_title(&title);
+                    if !title.is_empty() {
+                        out.insert(id, title);
+                    }
+                }
+            }
+        }
+        return Ok(out);
+    }
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| err("index path is not valid UTF-8"))?;
+    let mut reader =
+        PageReader::open(path_str).map_err(|error| err(format!("open index: {error}")))?;
+    let catalog =
+        read_catalog(&mut reader).map_err(|error| crate::err(format!("catalog: {error}")))?;
+    let legacy = is_jet3(path);
+    let mut out = HashMap::new();
+    for entry in &catalog {
+        let Ok(table) = read_table(&mut reader, &entry.name, legacy) else {
+            continue;
+        };
+        let Some(id_column) = pick_column(&table, &["book_id", "bkid"]) else {
+            continue;
+        };
+        let Some(title_column) = pick_column(&table, &["book_name", "bk"]) else {
+            continue;
+        };
+        for row in &table.rows {
+            let Some(id) = int_of(&table, row, &id_column) else {
+                continue;
+            };
+            let title = clean_title(&text_of(&table, row, &title_column));
+            if !title.is_empty() {
+                out.insert(id, title);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
