@@ -746,7 +746,7 @@ fn set_pane_visible(state: &mut State, kind: PaneKind, visible: bool) {
     let existing = state
         .panes
         .iter()
-        .find(|(_, pane_kind)| *pane_kind == kind)
+        .find(|(_, pane_kind)| **pane_kind == kind)
         .map(|(pane, _)| *pane);
     match (existing, visible) {
         (Some(pane), false) => {
@@ -756,7 +756,7 @@ fn set_pane_visible(state: &mut State, kind: PaneKind, visible: bool) {
             let target = state
                 .panes
                 .iter()
-                .find(|(_, pane_kind)| *pane_kind == PaneKind::Reader)
+                .find(|(_, pane_kind)| **pane_kind == PaneKind::Reader)
                 .map(|(pane, _)| *pane)
                 .or_else(|| state.panes.iter().next().map(|(pane, _)| *pane));
             if let Some(target) = target {
