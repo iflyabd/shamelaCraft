@@ -6241,6 +6241,12 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         }
         if rows.is_empty() {
             rows.push(ar_boxed(tr(lang, "no_results"), 13.0));
+            // Nothing in the curated sources: offer the archive.org search.
+            rows.push(
+                button(ar_boxed(tr(lang, "search_archive"), 12.0))
+                    .on_press(Message::DlSearch)
+                    .into(),
+            );
         }
         let header = row![
             button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
