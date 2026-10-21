@@ -45,7 +45,8 @@ Lightweight, open-source Arabic library reader in pure Rust.
 - Persistent bookmarks (`~/.shamelacraft/bookmarks.db`) and page notes
 - Toolbar tooltips on every button, bilingual labels, keyboard shortcuts
 - RTL-first layout, vertical scrollbars on the **left**, bundled Amiri font,
-  resizable reader / book-list / side panels
+  resizable reader page/index split, book-list and side panels (every split
+  is draggable, every pane can be closed and brought back)
 - Trilingual interface (Arabic / English / French) with one-key switch
 - Page translation (free MyMemory API, chunked + locally cached)
 - Native builds for x86-64 **and ARM64** Linux — no emulation needed
