@@ -4846,25 +4846,23 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     // One index at a time: either the suras or the thirty juz, never mixed.
     let chrome = state.chrome();
     let accent = state.accent.color();
-    let mode_row = row![
-        button(ar_boxed(tr(lang, "quran_sura_index"), 12.0))
-            .on_press(Message::QuranIndexPick(QuranIndex::Sura))
-            .style(if matches!(state.quran_index, QuranIndex::Sura) {
-                accent_style(accent, chrome.radius)
-            } else {
-                button::text
-            })
-            .width(Length::Fill),
-        button(ar_boxed(tr(lang, "quran_juz_index"), 12.0))
-            .on_press(Message::QuranIndexPick(QuranIndex::Juz))
-            .style(if matches!(state.quran_index, QuranIndex::Juz) {
-                accent_style(accent, chrome.radius)
-            } else {
-                button::text
-            })
-            .width(Length::Fill),
-    ]
-    .spacing(4);
+    let sura_button = button(ar_boxed(tr(lang, "quran_sura_index"), 12.0))
+        .on_press(Message::QuranIndexPick(QuranIndex::Sura))
+        .width(Length::Fill);
+    let sura_button = if matches!(state.quran_index, QuranIndex::Sura) {
+        sura_button.style(accent_style(accent, chrome.radius))
+    } else {
+        sura_button.style(button::text)
+    };
+    let juz_button = button(ar_boxed(tr(lang, "quran_juz_index"), 12.0))
+        .on_press(Message::QuranIndexPick(QuranIndex::Juz))
+        .width(Length::Fill);
+    let juz_button = if matches!(state.quran_index, QuranIndex::Juz) {
+        juz_button.style(accent_style(accent, chrome.radius))
+    } else {
+        juz_button.style(button::text)
+    };
+    let mode_row = row![sura_button, juz_button].spacing(4);
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     match state.quran_index {
         QuranIndex::Sura => {
