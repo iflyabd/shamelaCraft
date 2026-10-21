@@ -4399,16 +4399,15 @@ fn side_pane(state: &State) -> Element<'_, Message> {
     .style(tooltip_style)
     .into();
     let header = row![Space::with_width(Length::Fill), close].spacing(6);
+    // The tree layouts replace the sections panel; the other panels (authors,
+    // bookmarks, Quran, downloads, control) stay reachable from the tabs.
     let body: Element<'_, Message> = match state.side_mode {
         SideMode::Tabs => sidebar(state),
-        SideMode::Tree => catalog_tree(state),
-        SideMode::TwoTrees => two_trees(state),
+        SideMode::Tree if matches!(state.panel, Panel::Library) => catalog_tree(state),
+        SideMode::TwoTrees if matches!(state.panel, Panel::Library) => two_trees(state),
+        _ => sidebar(state),
     };
-    let tabs: Element<'_, Message> = if matches!(state.side_mode, SideMode::Tabs) {
-        panel_tabs(state)
-    } else {
-        Space::with_height(Length::Fixed(0.0)).into()
-    };
+    let tabs: Element<'_, Message> = panel_tabs(state);
     column![header, body, tabs]
         .spacing(4)
         .height(Length::Fill)
