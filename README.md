@@ -34,7 +34,14 @@ Lightweight, open-source Arabic library reader in pure Rust.
   keyless Arabic tafsirs cached locally
 - **Settings popup** with every option persisted: font size, line spacing,
   text/background colors, accent color, rounded corners, light/dark theme,
-  diacritics, search normalization, startup behavior
+  diacritics, search normalization, startup behavior, **layout** (pane
+  switches, side pane shape, reset)
+- **Customizable side panes**: the books pane and the side pane are
+  resizable by dragging, each has a close button, and the **عرض / View**
+  menu lists them with their state so a closed pane can be brought back.
+  The side pane can be shown as tabs, as one expandable tree (sections with
+  the books inside them) or as two resizable trees (catalog + the index of
+  the open book)
 - Persistent bookmarks (`~/.shamelacraft/bookmarks.db`) and page notes
 - Toolbar tooltips on every button, bilingual labels, keyboard shortcuts
 - RTL-first layout, vertical scrollbars on the **left**, bundled Amiri font,
