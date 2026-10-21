@@ -30,7 +30,8 @@ Lightweight, open-source Arabic library reader in pure Rust.
   be browsed, but archive.org only extracts inner books from the first volume;
   later volumes return 503 for individual files.
 - **One unified reading pane** for imported books and the Uthmani Quran
-- **Quran tab** with the sura index replacing the library tree, plus nine
+- **Quran tab** with the sura index **or** the thirty juz (one index at a
+  time, never mixed) replacing the library tree, plus nine
   keyless Arabic tafsirs cached locally
 - **Settings popup** with every option persisted: font size, line spacing,
   text/background colors, accent color, rounded corners, light/dark theme,
