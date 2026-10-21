@@ -933,13 +933,7 @@ fn open_database_path(state: &mut State, preset: Option<PathBuf>) {
                     state.lib = Some(lib);
                     state.author_names = author_names;
                     state.book_titles = book_titles;
-                    for entry in NAME_INDEXES {
-                        if let Some(map) = load_name_cache(entry) {
-                            state
-                                .pack_names
-                                .insert(pack_key(entry.id, entry.archive), map);
-                        }
-                    }
+                    preload_name_caches(state);
                     state.index = Some(index);
                     state.categories = state
                         .lib
@@ -1815,6 +1809,19 @@ fn file_label(state: &State, source_id: &str, archive: &str, name: &str) -> Stri
         return format!("{} {id}", tr(state.lang, "book_number"));
     }
     display_name(name)
+}
+
+/// Load every name index that was fetched in an earlier session, so numbered
+/// files show their real names without another download.
+fn preload_name_caches(state: &mut State) {
+    for entry in NAME_INDEXES {
+        let key = pack_key(entry.id, entry.archive);
+        if !state.pack_names.contains_key(&key) {
+            if let Some(map) = load_name_cache(entry) {
+                state.pack_names.insert(key, map);
+            }
+        }
+    }
 }
 
 fn names_dir() -> PathBuf {
@@ -2779,11 +2786,13 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DownloadTab(index) => download_tab(state, index),
         Message::DownloadOpen => {
             state.show_downloads = true;
+            preload_name_caches(state);
             ensure_source_files(state);
         }
         Message::DlToggle => {
             state.show_downloads = !state.show_downloads;
             if state.show_downloads {
+                preload_name_caches(state);
                 ensure_source_files(state);
             }
         }
