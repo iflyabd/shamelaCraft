@@ -1612,23 +1612,40 @@ fn search_all_sources(state: &mut State) {
         state.status = String::from(tr(state.lang, "search_all_hint"));
         return;
     }
-    let mut hits = Vec::new();
+    // Score every match, best first: exact title, title prefix, title
+    // contains, file name contains, then source-label matches. This keeps a
+    // well-known book at the top even when hundreds of rows share a word.
+    let mut scored: Vec<(u8, usize)> = Vec::new();
     for (index, file) in source_index().iter().enumerate() {
         let source = &DL_PRESETS[usize::from(file.source)];
         let label = file_label(state, source.id, &file.archive, &file.name);
+        let label_key = match_key(&label);
         let source_hit = key.chars().count() >= 4
             && source
                 .label
                 .split_whitespace()
                 .any(|word| match_key(word).contains(&key));
-        if match_key(&label).contains(&key) || match_key(&file.name).contains(&key) || source_hit {
-            hits.push(index);
-            if hits.len() >= MAX_GLOBAL_RESULTS {
-                break;
-            }
+        let score = if label_key == key {
+            Some(0u8)
+        } else if label_key.starts_with(&key) {
+            Some(1)
+        } else if label_key.contains(&key) {
+            Some(2)
+        } else if match_key(&file.name).contains(&key) {
+            Some(3)
+        } else if source_hit {
+            Some(4)
+        } else {
+            None
+        };
+        if let Some(score) = score {
+            scored.push((score, index));
         }
     }
-    let count = hits.len();
+    scored.sort_unstable();
+    scored.truncate(MAX_GLOBAL_RESULTS);
+    let count = scored.len();
+    let hits: Vec<usize> = scored.into_iter().map(|(_, index)| index).collect();
     state.dl_global = Some(hits);
     state.dl_results.clear();
     state.dl_sources = false;
