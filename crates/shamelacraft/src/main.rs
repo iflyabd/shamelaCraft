@@ -2000,122 +2000,29 @@ fn download_selected(state: &mut State) {
     };
 }
 
-/// Local file name for re-downloading a recorded URL: direct item files keep
-/// their leaf name, deep inner files get a stable hash prefix so two packs
-/// never collide on the same book id.
-fn recorded_name(url: &str) -> String {
-    let leaf = safe_leaf(url);
-    let decoded = percent_decode(url);
-    let rest = decoded.split("/download/").nth(1).unwrap_or("");
-    let segments = rest
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(rest)
-        .split('/')
-        .count();
-    if segments > 2 {
-        format!("{}_{leaf}", short_hash(url))
-    } else {
-        leaf
-    }
-}
-
-/// Download the book that is open right now: the recorded source URL of an
-/// imported book when known, otherwise the best name match inside the listed
-/// source item (real per-book download from a `.bok` collection).
-fn download_current(state: &mut State) {
-    let Some(index) = state.active_tab else {
-        state.status = String::from("open a book first");
-        return;
-    };
-    download_tab(state, index);
-}
-
-/// Download (or re-download) the book of one open tab, active or not.
+/// Search every curated source for the title of one open tab (active or not)
+/// and open the download manager on the results. Reading, not downloading:
+/// the user picks the exact edition from the list.
 fn download_tab(state: &mut State, index: usize) {
     let Some(tab) = state.tabs.get(index) else {
         state.status = String::from("open a book first");
         return;
     };
     let title = tab.title.clone();
-    let db = tab.db.clone();
-
-    let mut pack_sidecar: Option<(String, String)> = None;
-    if let Some(db) = db {
-        let stem = db
-            .file_stem()
-            .and_then(|part| part.to_str())
-            .unwrap_or("book")
-            .to_string();
-        if let Ok(url) = std::fs::read_to_string(books_dir().join(format!("{stem}.db.url"))) {
-            let url = url.trim().to_string();
-            if !url.is_empty() {
-                let file_name = recorded_name(&url);
-                if after_kind(&file_name) == AfterDl::ImportArchive {
-                    // Old imports recorded the whole pack; keep it as the
-                    // last resort and try a single-book match first.
-                    pack_sidecar = Some((file_name, url));
-                } else {
-                    let dest = downloads_dir().join(&file_name);
-                    let after = after_kind(&file_name);
-                    enqueue(state, file_name.clone(), url, dest, after);
-                    state.status = format!("re-downloading: {file_name}");
-                    return;
-                }
-            }
-        }
-    }
-
-    ensure_source_files(state);
-    let key = match_key(&title);
-    if !key.is_empty() {
-        let hit = state
-            .dl_files
-            .iter()
-            .find(|file| {
-                let stem = std::path::Path::new(&file.name)
-                    .file_stem()
-                    .and_then(|part| part.to_str())
-                    .unwrap_or(&file.name);
-                let stem_key = match_key(stem);
-                !stem_key.is_empty() && (stem_key.contains(&key) || key.contains(&stem_key))
-            })
-            .cloned();
-        if let Some(file) = hit {
-            enqueue_file(state, file.name.clone());
-            state.status = format!("queued book: {}", display_name(&file.name));
-            return;
-        }
-
-        // Nothing in the listed source: search every curated source by the
-        // resolved title before giving up.
-        let mut global = source_index().iter().position(|file| {
-            let source = &DL_PRESETS[usize::from(file.source)];
-            match_key(&file_label(state, source.id, &file.archive, &file.name)) == key
-        });
-        if global.is_none() {
-            global = source_index().iter().position(|file| {
-                let source = &DL_PRESETS[usize::from(file.source)];
-                let label = match_key(&file_label(state, source.id, &file.archive, &file.name));
-                !label.is_empty() && (label.contains(&key) || key.contains(&label))
-            });
-        }
-        if let Some(index) = global {
-            download_indexed(state, index);
-            return;
-        }
-    }
-
-    if let Some((file_name, url)) = pack_sidecar {
-        let dest = downloads_dir().join(&file_name);
-        let after = after_kind(&file_name);
-        enqueue(state, file_name.clone(), url, dest, after);
-        state.status = format!("re-downloading pack: {file_name}");
-        return;
-    }
-
-    state.status = String::from(tr(state.lang, "no_source_match"));
+    state.dl_query = title;
+    state.dl_results.clear();
+    state.dl_sources = false;
     state.show_downloads = true;
+    search_all_sources(state);
+}
+
+/// Download the book that is open right now (toolbar button).
+fn download_current(state: &mut State) {
+    let Some(index) = state.active_tab else {
+        state.status = String::from("open a book first");
+        return;
+    };
+    download_tab(state, index);
 }
 
 fn cancel_all(state: &mut State) {
@@ -5979,18 +5886,6 @@ mod tests {
         );
         assert_eq!(safe_leaf(".../%2E%2E"), "book.bok");
         assert_eq!(safe_leaf(""), "book.bok");
-    }
-
-    #[test]
-    fn recorded_names_stay_flat() {
-        let deep =
-            "https://archive.org/download/Shamela_android/shamela.part01.rar/shamela%2F10006.mbok";
-        let name = recorded_name(deep);
-        assert!(name.ends_with("_10006.mbok"), "{name}");
-        assert!(!name.contains('/'));
-
-        let direct = "https://archive.org/download/item/%D9%83%D8%AA%D8%A7%D8%A8.bok";
-        assert_eq!(recorded_name(direct), "كتاب.bok");
     }
 
     #[test]

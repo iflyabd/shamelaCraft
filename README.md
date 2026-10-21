@@ -131,12 +131,12 @@ Three keyless paths, all offline-friendly after the first fetch:
    `.mbok` files are named from the open master database; packs that ship their
    own catalog (مكتبة ابن وهف / المكتبة السلفية الشاملة) get a **جلب الأسماء**
    button that downloads only their small `main.mdb` index and shows every
-   book's real name before any book is downloaded. The open book can be
-   fetched from the reader header (تحميل الكتاب): if it was imported before it
-   re-downloads its recorded source (deep inner paths included), otherwise the
-   best title match is queued — first inside the listed source, then across
-   every curated source. Everything converts to the local `Page`/`Title`
-   format and opens in a reader tab automatically.
+   book's real name before any book is downloaded. The green download button
+   on any book tab (and تحميل الكتاب in the reader header) opens the download
+   manager with that book's title already in the search box and searches every
+   curated source at once, so you choose the edition before anything is
+   downloaded. Everything converts to the local `Page`/`Title` format and
+   opens in a reader tab automatically.
 2. **Local `.bok` files.** Use استيراد BOK to convert any legacy `.bok`
    (Jet3/MDB, Windows-1256) with the pure-Rust importer.
 3. **Official per-book databases** (needs a free API key from mail@shamela.ws)
