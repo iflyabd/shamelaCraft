@@ -101,6 +101,13 @@ enum SideMode {
     TwoTrees,
 }
 
+/// The two parts of the reader pane: the page and its index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderKind {
+    Page,
+    Index,
+}
+
 /// Sections of the side pane in the two-tree layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SideKind {
@@ -313,6 +320,7 @@ enum Message {
     LastSearch,
     PaneResized(pane_grid::ResizeEvent),
     SideResized(pane_grid::ResizeEvent),
+    ReaderPaneResized(pane_grid::ResizeEvent),
     TogglePane(PaneKind),
     ClosePane(PaneKind),
     SideModePick(SideMode),
@@ -399,6 +407,8 @@ struct State {
     panes: pane_grid::State<PaneKind>,
     /// Inner split of the side pane (catalog tree / book index tree).
     side_panes: pane_grid::State<SideKind>,
+    /// Inner split of the reader pane (page / book index).
+    reader_panes: pane_grid::State<ReaderKind>,
     /// Layout of the side pane.
     side_mode: SideMode,
     /// Which side panes are visible.
@@ -483,6 +493,7 @@ impl Default for State {
             notes: Vec::new(),
             panes: init_panes(true, true),
             side_panes: init_side_panes(),
+            reader_panes: init_reader_panes(),
             side_mode: SideMode::Tabs,
             show_books_pane: true,
             show_side_pane: true,
@@ -725,6 +736,46 @@ fn init_panes(show_books: bool, show_side: bool) -> pane_grid::State<PaneKind> {
         (false, false) => {}
     }
     panes
+}
+
+/// Page over book index inside the reader pane, split by a drag handle.
+fn init_reader_panes() -> pane_grid::State<ReaderKind> {
+    let (mut panes, page) = pane_grid::State::new(ReaderKind::Page);
+    if let Some((_, split)) = panes.split(Axis::Vertical, page, ReaderKind::Index) {
+        panes.resize(split, 0.72);
+    }
+    panes
+}
+
+/// Show or hide the index column of the reader.
+fn set_reader_index_visible(state: &mut State, visible: bool) {
+    let existing = state
+        .reader_panes
+        .iter()
+        .find(|(_, kind)| **kind == ReaderKind::Index)
+        .map(|(pane, _)| *pane);
+    match (existing, visible) {
+        (Some(pane), false) => {
+            let _ = state.reader_panes.close(pane);
+        }
+        (None, true) => {
+            let page = state
+                .reader_panes
+                .iter()
+                .find(|(_, kind)| **kind == ReaderKind::Page)
+                .map(|(pane, _)| *pane);
+            if let Some(page) = page {
+                if let Some((_, split)) =
+                    state
+                        .reader_panes
+                        .split(Axis::Vertical, page, ReaderKind::Index)
+                {
+                    state.reader_panes.resize(split, 0.72);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Catalog tree over book index tree inside the side pane.
@@ -3161,6 +3212,9 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::SideResized(event) => {
             state.side_panes.resize(event.split, event.ratio);
         }
+        Message::ReaderPaneResized(event) => {
+            state.reader_panes.resize(event.split, event.ratio);
+        }
         Message::TogglePane(kind) => {
             let visible = match kind {
                 PaneKind::Books => !state.show_books_pane,
@@ -3215,6 +3269,7 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ToggleToc => {
             state.show_toc = !state.show_toc;
+            set_reader_index_visible(state, state.show_toc);
         }
         Message::ToggleNotes => {
             state.show_notes = !state.show_notes;
@@ -4832,7 +4887,7 @@ fn current_sura_name(state: &State) -> String {
     }
 }
 
-fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
+fn reader_page_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
     let font_size = state.font_size;
     let target = state.target_lang.as_str();
     let label = match tab.pages.get(tab.index) {
@@ -4950,15 +5005,12 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
         .height(Length::Fill)
         .padding(6)
         .style(reader_bg_style(state.reader_bg));
+    page_view
+}
 
-    fn flatten<'a>(nodes: &'a [TocNode], depth: usize, out: &mut Vec<(usize, &'a TocNode)>) {
-        for node in nodes {
-            out.push((depth, node));
-            flatten(&node.children, depth + 1, out);
-        }
-    }
+fn reader_index_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
     let mut flat: Vec<(usize, &TocNode)> = Vec::new();
-    flatten(&tab.toc, 0, &mut flat);
+    flatten_toc(&tab.toc, 0, &mut flat);
     let here = tab
         .pages
         .get(tab.index)
@@ -4978,21 +5030,33 @@ fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mess
                     label,
                     selected,
                     Message::TocJump(index),
-                    (font_size - 4.0).max(12.0),
+                    (state.font_size - 4.0).max(12.0),
                     state.chrome(),
                 ),
-                None => ar(label.as_str(), (font_size - 4.0).max(12.0)),
+                None => ar(label.as_str(), (state.font_size - 4.0).max(12.0)),
             }
         })
         .collect();
-    if !state.show_toc {
-        return column![page_view].height(Length::Fill).into();
-    }
-    let toc_view = scrollable(column(entries).spacing(2)).height(Length::Fill);
-    row![page_view, toc_view]
-        .spacing(8)
+    scrollable(column(entries).spacing(2))
         .height(Length::Fill)
         .into()
+}
+
+/// Reader pane: the page and its index, split by a draggable divider.
+fn reader_tab_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
+    if !state.show_toc {
+        return reader_page_view(state, tab);
+    }
+    pane_grid::PaneGrid::new(&state.reader_panes, |_pane, content, _| {
+        pane_grid::Content::new(match content {
+            ReaderKind::Page => reader_page_view(state, tab),
+            ReaderKind::Index => reader_index_view(state, tab),
+        })
+    })
+    .spacing(8)
+    .height(Length::Fill)
+    .on_resize(10.0, Message::ReaderPaneResized)
+    .into()
 }
 
 fn reader(state: &State) -> Element<'_, Message> {
