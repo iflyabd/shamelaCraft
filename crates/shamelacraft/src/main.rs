@@ -252,6 +252,7 @@ enum Message {
     DlGlobalSearch,
     DlDownloadIndexed(usize),
     DlFetchNames,
+    DlFetchNamesIndexed(usize),
     DlClearResults,
     DlOpenItem(String),
     AccentNext,
@@ -932,6 +933,13 @@ fn open_database_path(state: &mut State, preset: Option<PathBuf>) {
                     state.lib = Some(lib);
                     state.author_names = author_names;
                     state.book_titles = book_titles;
+                    for entry in NAME_INDEXES {
+                        if let Some(map) = load_name_cache(entry) {
+                            state
+                                .pack_names
+                                .insert(pack_key(entry.id, entry.archive), map);
+                        }
+                    }
                     state.index = Some(index);
                     state.categories = state
                         .lib
@@ -2970,6 +2978,14 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::DlGlobalSearch => search_all_sources(state),
         Message::DlDownloadIndexed(index) => download_indexed(state, index),
         Message::DlFetchNames => start_name_fetch(state),
+        Message::DlFetchNamesIndexed(index) => {
+            if let Some(file) = source_index().get(index) {
+                let source = &DL_PRESETS[usize::from(file.source)];
+                state.dl_id = source.id.to_string();
+                state.dl_archive = file.archive.clone();
+            }
+            start_name_fetch(state);
+        }
         Message::DlClearResults => {
             state.dl_results.clear();
             state.dl_global = None;
@@ -5618,6 +5634,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         (header.into(), source_list(state))
     } else if let Some(hits) = state.dl_global.as_ref() {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        let mut names_offered: Vec<String> = Vec::new();
         for index in hits.iter().take(MAX_RENDER_FILES) {
             let Some(file) = source_index().get(*index) else {
                 continue;
@@ -5633,19 +5650,28 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
             .gap(4)
             .style(tooltip_style)
             .into();
-            rows.push(
-                row![
-                    button(ar_boxed(tr(lang, "download"), 12.0))
-                        .on_press(Message::DlDownloadIndexed(*index)),
-                    ar_boxed(fmt_size(file.size), 12.0),
-                    ar_boxed(trim_text(source.label, 22), 11.0),
-                    Space::with_width(Length::Fill),
-                    tip,
-                ]
-                .spacing(6)
-                .width(Length::Fill)
-                .into(),
-            );
+            let mut cells: Vec<Element<'_, Message>> = vec![
+                button(ar_boxed(tr(lang, "download"), 12.0))
+                    .on_press(Message::DlDownloadIndexed(*index))
+                    .into(),
+                ar_boxed(fmt_size(file.size), 12.0),
+                ar_boxed(trim_text(source.label, 22), 11.0),
+            ];
+            let names_key = pack_key(source.id, &file.archive);
+            if name_index_source(source.id, &file.archive).is_some()
+                && !state.pack_names.contains_key(&names_key)
+                && !names_offered.contains(&names_key)
+            {
+                names_offered.push(names_key);
+                cells.push(
+                    button(ar_boxed(tr(lang, "fetch_names"), 10.0))
+                        .on_press(Message::DlFetchNamesIndexed(*index))
+                        .into(),
+                );
+            }
+            cells.push(Space::with_width(Length::Fill).into());
+            cells.push(tip);
+            rows.push(row(cells).spacing(6).width(Length::Fill).into());
         }
         if rows.is_empty() {
             rows.push(ar_boxed(tr(lang, "no_results"), 13.0));
@@ -5800,10 +5826,10 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
     ]
     .spacing(6)
     .padding(4)
-    .width(Length::Fixed(640.0));
+    .width(Length::Fixed(700.0));
     let card = container(body)
         .padding(18)
-        .width(Length::Fixed(700.0))
+        .width(Length::Fixed(760.0))
         .style(popup_card_style(dark));
     modal_shell(card)
 }
