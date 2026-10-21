@@ -198,6 +198,9 @@ struct Tab {
     title: String,
     kind: TabKind,
     /// Local SQLite file when the book came from a downloaded/imported file.
+    /// Local converted database of an imported book (kept for later
+    /// re-export/re-open features; title search no longer reads it).
+    #[allow(dead_code)]
     db: Option<PathBuf>,
 }
 
@@ -1816,9 +1819,9 @@ fn file_label(state: &State, source_id: &str, archive: &str, name: &str) -> Stri
 fn preload_name_caches(state: &mut State) {
     for entry in NAME_INDEXES {
         let key = pack_key(entry.id, entry.archive);
-        if !state.pack_names.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = state.pack_names.entry(key) {
             if let Some(map) = load_name_cache(entry) {
-                state.pack_names.insert(key, map);
+                slot.insert(map);
             }
         }
     }
