@@ -89,6 +89,14 @@ enum PaneKind {
     Side,
 }
 
+/// Which index the Quran panel lists: the suras or the thirty juz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum QuranIndex {
+    #[default]
+    Sura,
+    Juz,
+}
+
 /// How the side pane shows its content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SideMode {
@@ -311,6 +319,8 @@ enum Message {
     TranslatePage,
     CycleTarget,
     QuranSura(i64),
+    QuranJuz(i64),
+    QuranIndexPick(QuranIndex),
     QuranSearch(String),
     QuranDownload,
     NoteInput(String),
@@ -396,6 +406,8 @@ struct State {
     panel: Panel,
     lang: Lang,
     quran_sura: i64,
+    /// Which index the Quran panel shows: suras or juz.
+    quran_index: QuranIndex,
     quran_query: String,
     quran_results: Vec<shamela_content::quran::Verse>,
     tafsir_ix: usize,
@@ -483,6 +495,7 @@ impl Default for State {
             panel: Panel::Library,
             lang: Lang::Ar,
             quran_sura: 1,
+            quran_index: QuranIndex::Sura,
             quran_query: String::new(),
             quran_results: Vec::new(),
             tafsir_ix: 0,
@@ -1772,40 +1785,34 @@ fn download_indexed(state: &mut State, index: usize) {
 
 /// Search every curated source by book name, file name or source label.
 fn search_all_sources(state: &mut State) {
-    let key = match_key(&state.dl_query);
+    let key = title_key(&state.dl_query);
     if key.chars().count() < 2 {
         state.status = String::from(tr(state.lang, "search_all_hint"));
         return;
     }
-    // Score every match, best first: exact title, title prefix, title
-    // contains, file name contains, then source-label matches. This keeps a
-    // well-known book at the top even when hundreds of rows share a word.
+    // Score every match, best first: the same title, then a title that only
+    // adds or drops words, then the same words in another order, then file
+    // names and finally the source name. This keeps the book the user opened
+    // at the top even when hundreds of rows share a word.
     let mut scored: Vec<(u8, usize)> = Vec::new();
     for (index, file) in source_index().iter().enumerate() {
         let source = &DL_PRESETS[usize::from(file.source)];
         let label = file_label(state, source.id, &file.archive, &file.name);
-        let label_key = match_key(&label);
         let source_hit = key.chars().count() >= 4
             && source
                 .label
                 .split_whitespace()
-                .any(|word| match_key(word).contains(&key));
-        let score = if label_key == key {
-            Some(0u8)
-        } else if label_key.starts_with(&key) {
-            Some(1)
-        } else if label_key.contains(&key) {
-            Some(2)
-        } else if match_key(&file.name).contains(&key) {
-            Some(3)
+                .any(|word| title_key(word).contains(&key));
+        let score = if let Some(score) = title_score(&state.dl_query, &label) {
+            score
+        } else if title_key(&file.name).contains(&key) {
+            5
         } else if source_hit {
-            Some(4)
+            6
         } else {
-            None
+            continue;
         };
-        if let Some(score) = score {
-            scored.push((score, index));
-        }
+        scored.push((score, index));
     }
     scored.sort_unstable();
     scored.truncate(MAX_GLOBAL_RESULTS);
@@ -1892,6 +1899,101 @@ fn match_key(content: &str) -> String {
         .flat_map(|ch| ch.to_lowercase())
         .filter(|ch| ch.is_alphanumeric())
         .collect()
+}
+
+/// Normalized key for title matching: no tashkeel, no tatweel, unified
+/// hamza, lower case and alphanumerics only. Two spellings of one title
+/// ("أحاديث" / "احاديث") therefore share the same key.
+fn title_key(content: &str) -> String {
+    content
+        .chars()
+        .filter(|ch| !matches!(ch, '\u{064B}'..='\u{0652}' | '\u{0640}' | '\u{0670}'))
+        .map(|ch| match ch {
+            '\u{0623}' | '\u{0625}' | '\u{0622}' | '\u{0671}' => '\u{0627}',
+            '\u{0624}' => '\u{0648}',
+            '\u{0626}' => '\u{064A}',
+            other => other,
+        })
+        .flat_map(|ch| ch.to_lowercase())
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
+}
+
+/// Words that say nothing about the book: editions, volumes and print data.
+const TITLE_NOISE: &[&str] = &[
+    "الطبعة",
+    "طبعة",
+    "تحقيق",
+    "تعليق",
+    "الجزء",
+    "جزء",
+    "المجلد",
+    "مجلد",
+    "ط",
+    "مجموعة",
+];
+
+/// Meaningful words of a title, normalized, without edition noise.
+fn title_tokens(content: &str) -> Vec<String> {
+    content
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(title_key)
+        .filter(|word| !word.is_empty())
+        .filter(|word| !word.chars().all(|ch| ch.is_ascii_digit()))
+        .filter(|word| !TITLE_NOISE.contains(&word.as_str()))
+        .collect()
+}
+
+/// Title without edition noise, used to compare two spellings of one book.
+fn title_core(content: &str) -> String {
+    title_tokens(content).join("")
+}
+
+/// How well a wanted title matches a label. Lower is better, `None` means no
+/// match at all. The score also orders the result list, so the edition the
+/// user opened comes first.
+fn title_score(wanted: &str, label: &str) -> Option<u8> {
+    let key = title_key(wanted);
+    let other = title_key(label);
+    if key.is_empty() || other.is_empty() {
+        return None;
+    }
+    if key == other {
+        return Some(0);
+    }
+    // One title is the beginning of the other.
+    if other.starts_with(&key) || key.starts_with(&other) {
+        return Some(1);
+    }
+    // One title sits inside the other (extra edition or author words).
+    if other.contains(&key) || key.contains(&other) {
+        return Some(2);
+    }
+    // Same title, different edition marks.
+    let core = title_core(wanted);
+    let other_core = title_core(label);
+    if !core.is_empty() && !other_core.is_empty() {
+        if core == other_core {
+            return Some(2);
+        }
+        if core.contains(&other_core) || other_core.contains(&core) {
+            return Some(3);
+        }
+    }
+    // Same words in a different order or with a few extra ones.
+    let words = title_tokens(wanted);
+    let other_words = title_tokens(label);
+    if words.len() >= 2 && other_words.len() >= 2 && words.first() == other_words.first() {
+        let hits = words
+            .iter()
+            .filter(|word| other_words.contains(word))
+            .count();
+        if hits >= 2 && hits * 4 >= words.len() * 3 {
+            return Some(4);
+        }
+    }
+    None
 }
 
 /// "540 KB" / "12.3 MB" / "1.20 GB" / "—" when the listing has no size.
@@ -2184,6 +2286,39 @@ fn download_tab(state: &mut State, index: usize) {
     state.dl_sources = false;
     state.show_downloads = true;
     search_all_sources(state);
+    // The curated sources do not hold every book of the master catalog, so
+    // fall back to archive.org when the local catalog has no match.
+    let empty = state
+        .dl_global
+        .as_ref()
+        .map(|hits| hits.is_empty())
+        .unwrap_or(true);
+    if empty {
+        search_archive(state);
+    }
+}
+
+/// Search archive.org for items that carry the given title. Used on its own
+/// and as the fallback when the curated sources have no match.
+fn search_archive(state: &mut State) {
+    let query = state.dl_query.trim().to_string();
+    if query.is_empty() {
+        state.status = String::from("type a book title to search archive.org");
+        return;
+    }
+    state.dl_sources = false;
+    state.dl_archive.clear();
+    match shamela_import::archive::search_items(&query, 30) {
+        Ok(items) => {
+            let count = items.len();
+            state.dl_results = items;
+            state.status = format!("archive.org: {count} book item(s) for \"{query}\"");
+        }
+        Err(error) => {
+            state.dl_results.clear();
+            state.status = format!("archive search failed: {error}");
+        }
+    }
 }
 
 /// Download the book that is open right now (toolbar button).
@@ -3039,25 +3174,8 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::DlQueryInput(text) => state.dl_query = text,
         Message::DlSearch => {
-            let query = state.dl_query.trim().to_string();
             state.dl_global = None;
-            if query.is_empty() {
-                state.status = String::from("type a book title to search archive.org");
-            } else {
-                state.dl_sources = false;
-                state.dl_archive.clear();
-                match shamela_import::archive::search_items(&query, 30) {
-                    Ok(items) => {
-                        let count = items.len();
-                        state.dl_results = items;
-                        state.status = format!("archive.org: {count} book item(s) for \"{query}\"");
-                    }
-                    Err(error) => {
-                        state.dl_results.clear();
-                        state.status = format!("archive search failed: {error}");
-                    }
-                }
-            }
+            search_archive(state);
         }
         Message::DlGlobalSearch => search_all_sources(state),
         Message::DlDownloadIndexed(index) => download_indexed(state, index),
@@ -3418,6 +3536,16 @@ fn apply(state: &mut State, message: Message) -> Task<Message> {
         Message::QuranSura(sura) => {
             state.quran_sura = sura.clamp(1, 114);
             open_quran_tab(state, state.quran_sura);
+        }
+        Message::QuranJuz(juz) => {
+            let index = (juz.clamp(1, 30) - 1) as usize;
+            if let Some(&(sura, _)) = JUZ_STARTS.get(index) {
+                state.quran_sura = sura;
+                open_quran_tab(state, sura);
+            }
+        }
+        Message::QuranIndexPick(index) => {
+            state.quran_index = index;
         }
         Message::QuranSearch(query) => {
             state.quran_query = query;
@@ -4664,6 +4792,7 @@ fn juz_of_sura(sura: i64) -> i64 {
 }
 
 fn quran_panel(state: &State) -> Element<'_, Message> {
+    let lang = state.lang;
     let empty = shamela_content::quran::QuranDb::open(&quran_db())
         .map(|db| db.count().unwrap_or(0) == 0)
         .unwrap_or(true);
@@ -4704,37 +4833,69 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
         .height(Length::Fill)
         .into();
     }
-    let mut suras: Vec<Element<'_, Message>> = Vec::new();
-    for (index, name) in shamela_content::quran::SURA_NAMES.iter().enumerate() {
-        let id = index as i64 + 1;
-        for (juz_index, &(start, aya)) in JUZ_STARTS.iter().enumerate() {
-            if start != id {
-                continue;
-            }
-            let juz = juz_index as i64 + 1;
-            let label = if aya <= 1 {
-                format!("{} {juz}", tr(state.lang, "juz_word"))
+    // One index at a time: either the suras or the thirty juz, never mixed.
+    let chrome = state.chrome();
+    let accent = state.accent.color();
+    let mode_row = row![
+        button(ar_boxed(tr(lang, "quran_sura_index"), 12.0))
+            .on_press(Message::QuranIndexPick(QuranIndex::Sura))
+            .style(if matches!(state.quran_index, QuranIndex::Sura) {
+                accent_style(accent, chrome.radius)
             } else {
-                format!("{} {juz} — {aya}", tr(state.lang, "juz_word"))
-            };
-            suras.push(
-                container(ar_boxed(label, 12.0))
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::End)
-                    .into(),
-            );
+                button::text
+            })
+            .width(Length::Fill),
+        button(ar_boxed(tr(lang, "quran_juz_index"), 12.0))
+            .on_press(Message::QuranIndexPick(QuranIndex::Juz))
+            .style(if matches!(state.quran_index, QuranIndex::Juz) {
+                accent_style(accent, chrome.radius)
+            } else {
+                button::text
+            })
+            .width(Length::Fill),
+    ]
+    .spacing(4);
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    match state.quran_index {
+        QuranIndex::Sura => {
+            for (index, name) in shamela_content::quran::SURA_NAMES.iter().enumerate() {
+                let id = index as i64 + 1;
+                rows.push(list_row(
+                    format!("{id}. {name}"),
+                    id == state.quran_sura,
+                    Message::QuranSura(id),
+                    13.0,
+                    state.chrome(),
+                ));
+            }
         }
-        suras.push(list_row(
-            format!("{id}. {name}"),
-            id == state.quran_sura,
-            Message::QuranSura(id),
-            13.0,
-            state.chrome(),
-        ));
+        QuranIndex::Juz => {
+            let current = juz_of_sura(state.quran_sura);
+            for (index, &(sura, aya)) in JUZ_STARTS.iter().enumerate() {
+                let juz = index as i64 + 1;
+                let name = shamela_content::quran::SURA_NAMES
+                    .get((sura - 1) as usize)
+                    .copied()
+                    .unwrap_or("?");
+                let label = if aya <= 1 {
+                    format!("{} {juz} — {name}", tr(lang, "juz_word"))
+                } else {
+                    format!("{} {juz} — {name} {aya}", tr(lang, "juz_word"))
+                };
+                rows.push(list_row(
+                    label,
+                    juz == current,
+                    Message::QuranJuz(juz),
+                    13.0,
+                    state.chrome(),
+                ));
+            }
+        }
     }
     column![
         search,
-        scrollable(column(suras).spacing(2).width(Length::Fill))
+        mode_row,
+        scrollable(column(rows).spacing(2).width(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
     ]
@@ -5816,6 +5977,41 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
     modal_shell(card)
 }
 
+/// archive.org results: whole collections that carry the searched title.
+fn archive_results_view(state: &State) -> (Element<'_, Message>, Element<'_, Message>) {
+    let lang = state.lang;
+    let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    for item in &state.dl_results {
+        rows.push(
+            row![
+                button(ar_boxed(tr(lang, "open"), 12.0))
+                    .on_press(Message::DlOpenItem(item.identifier.clone())),
+                ar_boxed(trim_text(&item.identifier, 22), 11.0),
+                Space::with_width(Length::Fill),
+                ar_boxed(trim_text(&item.title, 58), 13.0),
+            ]
+            .spacing(6)
+            .width(Length::Fill)
+            .into(),
+        );
+    }
+    let header = row![
+        button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
+        Space::with_width(Length::Fill),
+        ar_boxed(
+            format!(
+                "{} — {}",
+                tr(lang, "search_results"),
+                state.dl_results.len()
+            ),
+            13.0,
+        ),
+    ]
+    .spacing(6);
+    let items = scrollable(column(rows).spacing(4)).height(Length::Fixed(145.0));
+    (header.into(), items.into())
+}
+
 /// Download manager popup: source catalog, selection, queue and per-file
 /// downloads. The catalog opens either an item or one of its containers.
 fn downloads_modal(state: &State) -> Element<'_, Message> {
@@ -5984,6 +6180,14 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         ]
         .spacing(6);
         (header.into(), source_list(state))
+    } else if state
+        .dl_global
+        .as_ref()
+        .map(|hits| hits.is_empty())
+        .unwrap_or(false)
+        && !state.dl_results.is_empty()
+    {
+        archive_results_view(state)
     } else if let Some(hits) = state.dl_global.as_ref() {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
         let mut names_offered: Vec<String> = Vec::new();
@@ -6132,36 +6336,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
         let items = scrollable(column(files).spacing(4)).height(Length::Fixed(145.0));
         (header, items.into())
     } else {
-        let mut rows: Vec<Element<'_, Message>> = Vec::new();
-        for item in &state.dl_results {
-            rows.push(
-                row![
-                    button(ar_boxed(tr(lang, "open"), 12.0))
-                        .on_press(Message::DlOpenItem(item.identifier.clone())),
-                    ar_boxed(trim_text(&item.identifier, 22), 11.0),
-                    Space::with_width(Length::Fill),
-                    ar_boxed(trim_text(&item.title, 58), 13.0),
-                ]
-                .spacing(6)
-                .width(Length::Fill)
-                .into(),
-            );
-        }
-        let header = row![
-            button(ar_boxed(tr(lang, "back"), 12.0)).on_press(Message::DlClearResults),
-            Space::with_width(Length::Fill),
-            ar_boxed(
-                format!(
-                    "{} — {}",
-                    tr(lang, "search_results"),
-                    state.dl_results.len()
-                ),
-                13.0,
-            ),
-        ]
-        .spacing(6);
-        let items = scrollable(column(rows).spacing(4)).height(Length::Fixed(145.0));
-        (header.into(), items.into())
+        archive_results_view(state)
     };
 
     let body = column![
@@ -6332,6 +6507,30 @@ mod tests {
         );
         assert_eq!(safe_leaf(".../%2E%2E"), "book.bok");
         assert_eq!(safe_leaf(""), "book.bok");
+    }
+
+    #[test]
+    fn title_scores_ignore_spelling_differences() {
+        assert_eq!(title_score("صحيح البخاري", "صحيح البخاري"), Some(0));
+        // hamza and tashkeel must not hide a book
+        assert_eq!(
+            title_score("أحاديث إسماعيل بن جعفر", "احاديث اسماعيل بن جعفر"),
+            Some(0)
+        );
+        // a different edition mark still names the same book
+        assert_eq!(
+            title_score("أخبار مكة - الفاكهي - ط 4", "أخبار مكة - الفاكهي - ط 2"),
+            Some(2)
+        );
+        // the file may carry more words than the catalog title
+        assert_eq!(
+            title_score("صحيح البخاري", "صحيح البخاري في صحيح البخاري"),
+            Some(1)
+        );
+        // the catalog title may be the longer one
+        assert_eq!(title_score("صحيح البخاري", "البخاري"), Some(2));
+        // a different book must not match
+        assert!(title_score("كتاب الفقه", "كتاب الحديث").is_none());
     }
 
     #[test]

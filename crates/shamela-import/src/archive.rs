@@ -107,7 +107,7 @@ pub fn search_items(query: &str, rows: usize) -> Result<Vec<ArchiveItem>> {
         "{SEARCH_BASE}?q={}&fl%5B%5D=identifier&fl%5B%5D=title&rows={rows}&page=1&output=json&sort%5B%5D=downloads%20desc",
         url_encode_segment(&lucene)
     );
-    parse_search_items(&fetch_text(&url)?)
+    parse_search_items(&fetch_text_with(&url, 30)?)
 }
 
 /// Non-book files inside Shamela PC installs: the catalog in `Files/`
@@ -188,8 +188,14 @@ fn url_encode_segment(segment: &str) -> String {
 }
 
 fn fetch_text(url: &str) -> Result<String> {
+    fetch_text_with(url, 120)
+}
+
+/// Same as [`fetch_text`], but with a shorter deadline for calls that block
+/// the interface (the archive.org title search).
+fn fetch_text_with(url: &str, seconds: u64) -> Result<String> {
     ureq::get(url)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(seconds))
         .call()
         .map_err(|error| err(format!("GET {url}: {error}")))?
         .into_string()
