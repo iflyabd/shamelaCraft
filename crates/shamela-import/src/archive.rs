@@ -116,11 +116,11 @@ pub fn search_items(query: &str, rows: usize) -> Result<Vec<ArchiveItem>> {
 fn is_library_metadata(name: &str) -> bool {
     let lower = name.to_ascii_lowercase().replace('\\', "/");
     let segments: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
-    if segments.iter().any(|part| *part == "indices") {
+    if segments.contains(&"indices") {
         return true;
     }
     let file = segments.last().copied().unwrap_or("");
-    let in_files = segments.iter().any(|part| *part == "files");
+    let in_files = segments.contains(&"files");
     in_files && matches!(file, "main.mdb" | "user.mdb" | "special.mdb")
 }
 
