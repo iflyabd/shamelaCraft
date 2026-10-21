@@ -736,11 +736,6 @@ fn init_side_panes() -> pane_grid::State<SideKind> {
     panes
 }
 
-/// True when a pane of that kind is on screen.
-fn pane_visible(state: &State, kind: PaneKind) -> bool {
-    state.panes.iter().any(|(_, pane_kind)| **pane_kind == kind)
-}
-
 /// Show or hide one pane, keeping the rest of the layout intact.
 fn set_pane_visible(state: &mut State, kind: PaneKind, visible: bool) {
     let existing = state
