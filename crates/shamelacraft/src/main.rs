@@ -5608,6 +5608,14 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
             let source = &DL_PRESETS[usize::from(file.source)];
             let label = file_label(state, source.id, &file.archive, &file.name);
             let full = format!("{label} — {}", file.name);
+            let tip: Element<'_, Message> = Tooltip::new(
+                ar_boxed(trim_text(&label, 46), 13.0),
+                ar_boxed(trim_text(&full, 96), 11.0),
+                Position::Left,
+            )
+            .gap(4)
+            .style(tooltip_style)
+            .into();
             rows.push(
                 row![
                     button(ar_boxed(tr(lang, "download"), 12.0))
@@ -5615,14 +5623,7 @@ fn downloads_modal(state: &State) -> Element<'_, Message> {
                     ar_boxed(fmt_size(file.size), 12.0),
                     ar_boxed(trim_text(source.label, 22), 11.0),
                     Space::with_width(Length::Fill),
-                    Tooltip::new(
-                        ar_boxed(trim_text(&label, 46), 13.0),
-                        ar_boxed(trim_text(&full, 96), 11.0),
-                        Position::Left,
-                    )
-                    .gap(4)
-                    .style(tooltip_style)
-                    .into(),
+                    tip,
                 ]
                 .spacing(6)
                 .width(Length::Fill)
