@@ -5005,7 +5005,7 @@ fn reader_page_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Mes
         .height(Length::Fill)
         .padding(6)
         .style(reader_bg_style(state.reader_bg));
-    page_view
+    page_view.into()
 }
 
 fn reader_index_view<'a>(state: &'a State, tab: &'a ReaderTab) -> Element<'a, Message> {
