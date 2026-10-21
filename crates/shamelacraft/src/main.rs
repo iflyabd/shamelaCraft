@@ -5316,6 +5316,15 @@ fn menu_entries(state: &State) -> Vec<MenuDef> {
     ]
 }
 
+/// Short label of the current side pane layout (settings button).
+fn side_mode_short_label(lang: Lang, mode: SideMode) -> &'static str {
+    match mode {
+        SideMode::Tabs => tr(lang, "side_mode_tabs_short"),
+        SideMode::Tree => tr(lang, "side_mode_tree_short"),
+        SideMode::TwoTrees => tr(lang, "side_mode_two_short"),
+    }
+}
+
 /// Label of the current side pane layout.
 fn side_mode_label(lang: Lang, mode: SideMode) -> &'static str {
     match mode {
@@ -5711,8 +5720,12 @@ fn settings_modal(state: &State) -> Element<'_, Message> {
         row![
             ar(tr(state.lang, "side_mode"), 15.0),
             Space::with_width(Length::Fill),
-            button(ar_boxed(side_mode_label(state.lang, state.side_mode), 14.0))
-                .on_press(Message::SideModeCycle),
+            button(ar_boxed(
+                side_mode_short_label(state.lang, state.side_mode),
+                14.0
+            ))
+            .on_press(Message::SideModeCycle)
+            .width(Length::Fixed(120.0)),
         ]
         .spacing(6),
         row![button(ar(tr(state.lang, "layout_reset"), 14.0))
