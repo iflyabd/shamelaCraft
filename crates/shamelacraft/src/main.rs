@@ -4819,7 +4819,8 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     let search = text_input(tr(state.lang, "quran_search"), state.quran_query.as_str())
         .font(AMIRI)
         .on_input(Message::QuranSearch)
-        .padding(8);
+        .padding(8)
+        .width(Length::Fill);
     if !state.quran_results.is_empty() {
         let hits: Vec<Element<'_, Message>> = state
             .quran_results
@@ -4862,7 +4863,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
     } else {
         juz_button.style(button::text)
     };
-    let mode_row = row![sura_button, juz_button].spacing(4);
+    let mode_row = row![sura_button, juz_button].spacing(4).width(Length::Fill);
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     match state.quran_index {
         QuranIndex::Sura => {
@@ -4908,6 +4909,7 @@ fn quran_panel(state: &State) -> Element<'_, Message> {
             .height(Length::Fill)
     ]
     .spacing(8)
+    .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
