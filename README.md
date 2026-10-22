@@ -2,10 +2,43 @@
 
 Lightweight, open-source Arabic library reader in pure Rust.
 
+[![CI](https://github.com/iflyabd/shamelaCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/iflyabd/shamelaCraft/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/iflyabd/shamelaCraft?label=download&color=emerald)](https://github.com/iflyabd/shamelaCraft/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > **Clean-room reimplementation.** ShamelaCraft shares no code, text, or assets
 > with any proprietary reader. It only reads the documented shape of the
 > Shamela-4 `master.db` SQLite catalog that already lives on the user's own
 > machine. No affiliation with shamela.ws.
+
+## Download
+
+**Ready-to-run builds are published on the [Releases page](https://github.com/iflyabd/shamelaCraft/releases/latest)** —
+no Rust toolchain needed.
+
+| Platform | File | Run |
+| --- | --- | --- |
+| Linux x86-64 | `shamelacraft-linux-x86_64.tar.gz` | `tar -xzf … && ./shamelacraft` |
+| Linux ARM64 (Raspberry Pi, ARM servers) | `shamelacraft-linux-aarch64.tar.gz` | `tar -xzf … && ./shamelacraft` |
+| Windows x86-64 | `shamelacraft-windows-x86_64.zip` | unzip, run `shamelacraft.exe` |
+| macOS (Apple Silicon) | `shamelacraft-macos-aarch64.tar.gz` | `tar -xzf … && ./shamelacraft` |
+
+On Debian/Ubuntu install the file-picker library once:
+
+```sh
+sudo apt install libgtk-3-0
+```
+
+Each release ships `SHA256SUMS`:
+
+```sh
+sha256sum -c SHA256SUMS
+```
+
+No book data is bundled. Open your own Shamela-4 `master.db`, or download books
+from the built-in archive.org manager. Builds are produced by
+[`release.yml`](.github/workflows/release.yml) on every `v*` tag — Linux x86-64
+and ARM64 are required, Windows and macOS are best-effort.
 
 ## Features (v0.2)
 
@@ -94,11 +127,9 @@ cargo test --workspace
 
 ## Installation
 
-Download a ready build from
-[Releases](https://github.com/iflyabd/shamelaCraft/releases) (published from
-tags like `v0.1.0` — Linux x86-64/ARM64, Windows x86-64, macOS ARM64), or build
-from source with stable Rust (1.85+). Debian/Ubuntu needs one system package
-for the file picker:
+Grab a binary from [Download](#download) above (every tagged release is public
+and lists its checksums), or build from source with stable Rust (1.85+).
+Debian/Ubuntu needs one system package for the file picker:
 
 ```sh
 sudo apt install pkg-config libgtk-3-dev

@@ -16,17 +16,25 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    # Windows and macOS are built on a best-effort basis: a failure there must
+    # not block the Linux release.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: linux-x86_64
             runner: ubuntu-24.04
+            experimental: false
           - target: linux-aarch64
             runner: ubuntu-24.04-arm
+            experimental: false
           - target: windows-x86_64
             runner: windows-2025
+            experimental: true
           - target: macos-aarch64
             runner: macos-14
+            experimental: true
     steps:
       - uses: actions/checkout@v4
       - name: System deps (Linux)
@@ -36,7 +44,10 @@ jobs:
       - run: cargo build --release --locked -p shamelacraft
       - name: Package (Unix)
         if: runner.os != 'Windows'
-        run: tar -czf shamelacraft-${{ matrix.target }}.tar.gz -C target/release shamelacraft
+        run: |
+          tar -czf shamelacraft-${{ matrix.target }}.tar.gz \
+            -C target/release shamelacraft \
+            -C "$GITHUB_WORKSPACE" README.md LICENSE
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: Compress-Archive -Path target/release/shamelacraft.exe -DestinationPath shamelacraft-${{ matrix.target }}.zip
@@ -44,6 +55,7 @@ jobs:
         with:
           name: release-${{ matrix.target }}
           path: shamelacraft-${{ matrix.target }}.*
+          if-no-files-found: error
 
   release:
     name: Publish release
@@ -56,9 +68,62 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - run: >
-          gh release create "${{ github.ref_name }}" artifacts/*
-          --title "${{ github.ref_name }}"
-          --notes "ShamelaCraft ${{ github.ref_name }} — native builds for Linux (x86-64, ARM64), Windows (x86-64), macOS (ARM64). See README for install and book-download guides."
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          Native builds for **Linux (x86-64, ARM64)**, **Windows (x86-64)** and
+          **macOS (Apple Silicon)**. No book data is bundled: open your own
+          Shamela-4 `master.db`, or use the built-in archive.org download
+          manager to fetch books.
+
+          ### Highlights
+
+          - Keyless download manager: 26 curated archive.org sources, 20,700+
+            catalogued books, cross-source title search, deep pack browsing
+            (fetch one book from a ZIP/RAR without the whole pack).
+          - Tolerant Arabic title matching: hamza, tashkeel, tatweel, edition
+            marks (`ط`, `تحقيق`, `الجزء`) and extra words no longer hide a
+            book, and archive.org is searched automatically when the curated
+            sources have no match.
+          - Fully customizable panes: close buttons, View menu, tabs / one
+            expandable tree / two resizable trees, resizable reader index.
+          - Quran with a sura index **or** the thirty juz (never mixed), nine
+            keyless tafsirs and page translation.
+          - Arabic / English / French UI, persisted settings, RTL reader.
+
+          ### Install
+
+          **Linux (Debian/Ubuntu)**
+
+          ```sh
+          tar -xzf shamelacraft-linux-x86_64.tar.gz   # or -linux-aarch64
+          sudo apt install libgtk-3-0                # file picker, once
+          ./shamelacraft
+          ```
+
+          **Windows** — unzip and run `shamelacraft.exe`.
+
+          **macOS (Apple Silicon)**
+
+          ```sh
+          tar -xzf shamelacraft-macos-aarch64.tar.gz
+          xattr -dr com.apple.quarantine shamelacraft   # unsigned build
+          ./shamelacraft
+          ```
+
+          Verify a download with `sha256sum -c SHA256SUMS` (Linux/macOS) before
+          running it. Release notes and the full feature list are in the README.
+          EOF
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "ShamelaCraft $TAG" \
+              --notes-file notes.md \
+              --latest
+          fi
