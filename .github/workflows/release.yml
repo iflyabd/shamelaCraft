@@ -47,7 +47,7 @@ jobs:
         run: |
           tar -czf shamelacraft-${{ matrix.target }}.tar.gz \
             -C target/release shamelacraft \
-            -C "$GITHUB_WORKSPACE" README.md LICENSE
+            -C "$GITHUB_WORKSPACE" README.md LICENSE-MIT
       - name: Package (Windows)
         if: runner.os == 'Windows'
         run: Compress-Archive -Path target/release/shamelacraft.exe -DestinationPath shamelacraft-${{ matrix.target }}.zip
